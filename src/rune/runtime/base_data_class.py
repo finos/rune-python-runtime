@@ -1,6 +1,7 @@
 '''Base class for all Rune type classes'''
 import logging
 import importlib
+import copy
 import json
 from typing import get_args, get_origin, Any, Literal
 from typing_extensions import Self
@@ -177,7 +178,7 @@ class BaseDataClass(BaseModel, ComplexTypeMetaDataMixin):
                          rune_data: str | dict[str, Any],
                          validate_model: bool = True,
                          check_rune_constraints: bool = True,
-                         strict: bool = True,
+                         strict: bool = False,
                          raise_validation_errors: bool = True) -> BaseModel:
         # pylint: disable=line-too-long
         '''Rune compliant deserialization
@@ -194,7 +195,7 @@ class BaseDataClass(BaseModel, ComplexTypeMetaDataMixin):
             deserialization. Defaults to True.
 
             `strict (bool, optional):` Perform strict attribute validation.
-            Defaults to True.
+            Defaults to False.
 
             `raise_validation_errors (bool, optional):` Raise an exception in
             case a validation error has occurred. Defaults to True.
@@ -203,14 +204,20 @@ class BaseDataClass(BaseModel, ComplexTypeMetaDataMixin):
             `BaseModel:` The Rune model.
         '''
         if isinstance(rune_data, str):
-            rune_data = json.loads(rune_data)
+            rune_dict = json.loads(rune_data)
+            # NOTE: json.loads will not create the right atomic types
+            # (e.g. date, datetime, time etc) and the strict model validate
+            # will not attempt to convert them.
+            strict = False
         elif not isinstance(rune_data, dict):
             raise ValueError(f'rune_data is of type {type(rune_data)}, '
                              'alas it has to be either dict or str!')
-        rune_data.pop('@version', None)
-        rune_data.pop('@model', None)
-        rune_cls = cls._type_to_cls(rune_data)
-        model = rune_cls.model_validate(rune_data, strict=strict)
+        else:
+            rune_dict = copy.deepcopy(rune_data)
+        rune_dict.pop('@version', None)
+        rune_dict.pop('@model', None)
+        rune_cls = cls._type_to_cls(rune_dict)
+        model = rune_cls.model_validate(rune_dict, strict=strict)
         model.resolve_references(ignore_dangling=False, recurse=True)
         if validate_model:
             model.validate_model(check_rune_constraints=check_rune_constraints,
