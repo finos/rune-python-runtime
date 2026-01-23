@@ -69,9 +69,9 @@ def rune_resolve_attr(obj: Any | None, attrib: str) -> Any | list[Any] | None:
     attrib = rune_mangle_name(attrib)
 
     if inspect.isframe(obj):
-        obj = getattr(obj, 'f_locals')
+        return obj.f_locals.get(attrib)
     elif isinstance(obj, dict):
-        return obj[attrib]
+        return obj.get(attrib)
 
     return getattr(obj, attrib, None)
 
