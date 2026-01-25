@@ -1,6 +1,7 @@
 '''func proxy'''
 import inspect
 import functools
+from contextlib import contextmanager
 
 __all__ = ['FuncProxy', 'replaceable', 'create_module_attr_guardian']
 
@@ -50,7 +51,27 @@ def replaceable(func):
         return proxy(*args, **kwargs)
 
     wrapper.__assign__ = proxy.__assign__  # type: ignore
+    wrapper.__proxy__ = proxy   # type: ignore
     return wrapper
+
+
+@contextmanager
+def scoped_replace(proxy_func, replacement):
+    ''' Temporarily replace a replaceable function and restore after use.
+        Raises TypeError if not replaceable.
+    '''
+    if not (hasattr(proxy_func, "__assign__")
+            and hasattr(proxy_func, "__proxy__")):
+        raise TypeError(
+            "Function is not replaceable (missing __assign__/__proxy__).")
+
+    proxy = proxy_func.__proxy__
+    original = proxy.func
+    proxy.func = replacement
+    try:
+        yield
+    finally:
+        proxy.func = original
 
 
 def create_module_attr_guardian(module):
