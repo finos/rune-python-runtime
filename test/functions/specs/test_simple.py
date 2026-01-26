@@ -3,9 +3,10 @@ from decimal import Decimal
 import pytest
 from pydantic import ValidationError
 from rune.runtime.func_proxy import scoped_replace
-from test.functions.specs.RoundToNearest import RoundToNearest
-from test.functions.specs.RoundingModeEnum import RoundingModeEnum
-import test.functions.specs.RoundToNearest as mod_RoundToNearest
+from test.functions.specs.cdm.base.math.RoundToNearest import RoundToNearest
+from test.functions.specs.cdm.base.math.RoundingModeEnum import RoundingModeEnum
+
+import test.functions.specs.cdm.base.math.RoundToNearest as mod_RoundToNearest
 
 
 def test_simple_types():

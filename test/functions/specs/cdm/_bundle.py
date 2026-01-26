@@ -8,14 +8,13 @@ from pydantic import validate_call
 from rune.runtime.utils import rune_all_elements, rune_resolve_attr
 from rune.runtime.conditions import rune_execute_local_conditions, rune_local_condition
 from rune.runtime.func_proxy import replaceable, create_module_attr_guardian
-from .RoundingModeEnum import RoundingModeEnum
-
-__all__ = ['RoundToNearest']
+# from .RoundingModeEnum import RoundingModeEnum
+import test.functions.specs.cdm.base.math.RoundingModeEnum
 
 
 @replaceable
 @validate_call
-def RoundToNearest(value: Decimal, nearest: Decimal, roundingMode: RoundingModeEnum) -> Decimal:
+def RoundToNearest(value: Decimal, nearest: Decimal, roundingMode: test.functions.specs.cdm.base.math.RoundingModeEnum.RoundingModeEnum) -> Decimal:
     """
     Round a number to the supplied nearest, using the supplied rounding mode.
     
@@ -50,5 +49,6 @@ def RoundToNearest(value: Decimal, nearest: Decimal, roundingMode: RoundingModeE
     
     
     return roundedValue
+
 
 sys.modules[__name__].__class__ = create_module_attr_guardian(sys.modules[__name__].__class__)

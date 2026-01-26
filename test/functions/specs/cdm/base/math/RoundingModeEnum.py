@@ -2,7 +2,6 @@
 from enum import Enum
 import rune.runtime.metadata
 
-__all__ = ['RoundingModeEnum']
 
 class RoundingModeEnum(rune.runtime.metadata.EnumWithMetaMixin, Enum):
     """
