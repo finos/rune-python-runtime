@@ -239,7 +239,7 @@ class BaseMetaDataMixin:
         old_val = getattr(self, property_nm)
         allowed_ref_types = getattr(self, '_KEY_REF_CONSTRAINTS', {})
         if (ref.key_type.rune_ref_tag not in allowed_ref_types.get(
-                property_nm, {}) and not _replaceable(old_val)):
+                property_nm, {})): # and not _replaceable(old_val)):
             raise ValueError(f'Ref of type {ref.key_type} '
                              f'not allowed for {property_nm}. Allowed types '
                              f'are: {allowed_ref_types.get(property_nm, {})}')
