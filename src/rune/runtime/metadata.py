@@ -184,14 +184,16 @@ class BaseMetaDataMixin:
                 raise
         return key
 
-    def set_external_key(self, key: str, key_type: KeyType):
+    def set_external_key(self,
+                         key: str,
+                         key_type: KeyType = KeyType.EXTERNAL) -> Self:
         '''registers this object under the provided external key'''
         aux = self.get_meta(key_type.key_tag)
         if aux and aux != key:
             raise ValueError(f'This object already has an external key {aux}!'
                              f'Can\'t change it to {key}')
         if aux == key:
-            return
+            return self
 
         self.set_meta(check_allowed=True, **{key_type.key_tag: key})
         try:
@@ -199,6 +201,7 @@ class BaseMetaDataMixin:
         except:  # noqa
             self.set_meta(check_allowed=True, **{key_type.key_tag: None})
             raise
+        return self
 
     def get_object_by_key(self, key: str, key_type: KeyType):
         '''retrieve an object with a key an key type'''
