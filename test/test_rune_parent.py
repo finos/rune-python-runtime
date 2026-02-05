@@ -96,7 +96,7 @@ def test_deep_creation():
 def test_deep2_creation(mocker):
     '''no doc'''
     mocker.patch('rune.runtime.metadata.BaseMetaDataMixin._DEFAULT_SCOPE_TYPE',
-                 'test_rune_parent.Root')
+                 'test.test_rune_parent.Root')
     b = B(fieldB='some b content')
     a = A(b=b)
     b2 = B(fieldB='2 some other b content')
@@ -138,7 +138,6 @@ def test_root_deserialization():
     assert root.typeA == root.typeA.b.get_rune_parent()
     assert root.typeA == root.bAddress.get_rune_parent()
     assert root.typeA.b == root.bAddress
-
 
 
 def test_root_deep_deserialization():
