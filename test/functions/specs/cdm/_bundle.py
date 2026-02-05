@@ -5,7 +5,7 @@ import sys
 import inspect
 from decimal import Decimal
 from pydantic import validate_call
-from rune.runtime.utils import rune_all_elements, rune_resolve_attr
+from rune.runtime.utils import if_cond_fn, rune_all_elements, rune_resolve_attr
 from rune.runtime.conditions import rune_execute_local_conditions, rune_local_condition
 from rune.runtime.func_proxy import replaceable, create_module_attr_guardian
 from rune.runtime.native_registry import rune_execute_native
@@ -49,6 +49,37 @@ def cdm_base_math_RoundToNearest(value: Decimal, nearest: Decimal, roundingMode:
     roundedValue = rune_execute_native('cdm.base.math.RoundToNearest', value, nearest, roundingMode)
     
     return roundedValue
+
+
+
+@replaceable
+@validate_call
+def cdm_base_math_Abs(arg: Decimal) -> Decimal:
+    """
+    Returns the absolute value of a number. If the argument is not negative, the argument is returned. If the argument is negative, the negation of the argument is returned.
+
+    Parameters 
+    ----------
+    arg : number
+
+    Returns
+    -------
+    result : number
+
+    """
+    self = inspect.currentframe()
+
+
+    def _then_fn0():
+        return (-1 * rune_resolve_attr(self, "arg"))
+
+    def _else_fn0():
+        return rune_resolve_attr(self, "arg")
+
+    result =  if_cond_fn(rune_all_elements(rune_resolve_attr(self, "arg"), "<", 0), _then_fn0, _else_fn0)
+
+
+    return result
 
 
 sys.modules[__name__].__class__ = create_module_attr_guardian(sys.modules[__name__].__class__)

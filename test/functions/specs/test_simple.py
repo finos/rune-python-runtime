@@ -7,6 +7,7 @@ from rune.runtime.native_registry import rune_register_native
 from rune.runtime.native_registry import rune_deregister_native
 from test.functions.specs.cdm.base.math.RoundToNearest import RoundToNearest
 from test.functions.specs.cdm.base.math.RoundingModeEnum import RoundingModeEnum
+from test.functions.specs.cdm.base.math.Abs import Abs
 
 import test.functions.specs.cdm.base.math.RoundToNearest as mod_RoundToNearest
 
@@ -88,5 +89,11 @@ def test_scoped_replace():
         assert par == RoundToNearest(*par)  # type: ignore
     # test the function was restored
     test_simple_types()
+
+
+def test_abs_negative():
+        """Test abs negative"""
+        result = Abs(arg=-5)
+        assert result == 5
 
 # EOF

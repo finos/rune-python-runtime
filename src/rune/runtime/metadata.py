@@ -105,6 +105,10 @@ class Reference:
             key_type = key_type or KeyType.EXTERNAL
             self.target_key = target
             self.key_type = key_type
+            if not parent:
+                raise ValueError('When creating a reference only with an '
+                                 'external key, a parent object must be '
+                                 'specified!')
             self.target = parent.get_object_by_key(target, key_type)
 
     def get_reference(self, _):
@@ -189,11 +193,11 @@ class BaseMetaDataMixin:
         if aux == key:
             return
 
-        self.set_meta(**{key_type.key_tag: key})
+        self.set_meta(check_allowed=True, **{key_type.key_tag: key})
         try:
             self._get_object_map(key_type)[key] = self
         except:  # noqa
-            self.set_meta(**{key_type.key_tag: None})
+            self.set_meta(check_allowed=True, **{key_type.key_tag: None})
             raise
 
     def get_object_by_key(self, key: str, key_type: KeyType):
