@@ -78,7 +78,13 @@ class KeyType(Enum):
         return KeyType(rune_type)
 
 
-class Reference:
+class BaseReference:
+    ''' A base class allowing for Refrence and UnresolvedReference to be used 
+        in model construction
+    '''
+
+
+class Reference(BaseReference):
     '''manages a reference to a object with a key'''
     def __init__(self,
                  target: str | Any,
@@ -116,7 +122,7 @@ class Reference:
         return self
 
 
-class UnresolvedReference:
+class UnresolvedReference(BaseReference):
     '''used by the deserialization to hold temporarily unresolved references'''
     def __init__(self, key):
         rune_type, self.key = list(key.items())[0]
