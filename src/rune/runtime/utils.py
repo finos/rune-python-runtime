@@ -20,12 +20,6 @@ __all__ = [
 ]
 
 
-# def if_cond(ifexpr, thenexpr: str, elseexpr: str, obj: object):
-#     '''A helper to return the value of the ternary operator.'''
-#     expr = thenexpr if ifexpr else elseexpr
-#     return eval(expr, globals(), {'self': obj})  # pylint: disable=eval-used
-
-
 def if_cond_fn(ifexpr: bool, thenexpr: Callable, elseexpr: Callable) -> Any:
     ''' A helper to return the value of the ternary operator
         (functional version).
@@ -72,6 +66,9 @@ def rune_resolve_attr(obj: Any | None, attrib: str) -> Any | list[Any] | None:
         return obj.f_locals.get(attrib)
     elif isinstance(obj, dict):
         return obj.get(attrib)
+    elif hasattr(obj, '_rune_get_attr'):
+        # Custom resolver hook for draft-like objects.
+        return obj._rune_get_attr(attrib)
 
     return getattr(obj, attrib, None)
 
