@@ -6,10 +6,10 @@ from typing import Any
 from rune.runtime.base_data_class import BaseDataClass
 from rune.runtime.utils import rune_mangle_name
 
-__all__ = ['Draft']
+__all__ = ['ObjectBuilder']
 
 
-class Draft:
+class ObjectBuilder:
     '''Autovivifying object for dynamic property access.'''
     _data: dict[str, Any]
     _model_cls: type[BaseDataClass] | None
@@ -62,7 +62,7 @@ class Draft:
 
     @classmethod
     def _normalize(cls, value: Any) -> Any:
-        if isinstance(value, Draft):
+        if isinstance(value, ObjectBuilder):
             return value.to_dict()
         if isinstance(value, dict):
             return {k: cls._normalize(v) for k, v in value.items()}
@@ -79,10 +79,10 @@ class Draft:
 
 class _PathDraft:
     __slots__ = ('_root', '_path')
-    _root: Draft
+    _root: ObjectBuilder
     _path: list[str]
 
-    def __init__(self, root: Draft, path: list[str]):
+    def __init__(self, root: ObjectBuilder, path: list[str]):
         object.__setattr__(self, '_root', root)
         object.__setattr__(self, '_path', path)
 
@@ -98,8 +98,8 @@ class _PathDraft:
         node = self._root
         for seg in self._path:
             child = node._data.get(seg)
-            if not isinstance(child, Draft):
-                child = Draft()
+            if not isinstance(child, ObjectBuilder):
+                child = ObjectBuilder()
                 node._data[seg] = child
             node = child
         node._data[name] = value
