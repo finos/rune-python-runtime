@@ -49,6 +49,30 @@ class BaseDataClass(BaseModel, ComplexTypeMetaDataMixin):
                 value._set_rune_parent(self)
             super().__setattr__(name, value)
 
+    def __eq__(self, other: Any) -> bool:
+        if isinstance(other, BaseModel):
+            # Align with Pydantic's equality semantics but avoid parent recursion
+            self_type = self.__pydantic_generic_metadata__['origin'] or self.__class__
+            other_type = other.__pydantic_generic_metadata__['origin'] or other.__class__
+
+            if not (
+                self_type == other_type
+                and getattr(self, '__pydantic_private__', None)
+                == getattr(other, '__pydantic_private__', None)
+                and self.__pydantic_extra__ == other.__pydantic_extra__
+            ):
+                return False
+
+            model_fields = type(self).__pydantic_fields__.keys()
+            if not model_fields:
+                return True
+            _missing = object()
+            self_vals = tuple(self.__dict__.get(k, _missing) for k in model_fields)
+            other_vals = tuple(other.__dict__.get(k, _missing) for k in model_fields)
+            return self_vals == other_vals
+
+        return NotImplemented
+
     @model_serializer(mode='wrap')
     def _serialize_refs(self, serializer, info):
         '''should replace objects with refs while serializing'''

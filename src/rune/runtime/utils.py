@@ -14,9 +14,8 @@ __all__ = [
     'rune_filter', 'rune_all_elements', 'rune_contains', 'rune_disjoint',
     'rune_join', 'rune_flatten_list', 'rune_resolve_attr',
     'rune_resolve_deep_attr', 'rune_count', 'rune_attr_exists',
-    '_get_rune_object', 'rune_set_attr', 'rune_add_attr',
-    'rune_check_cardinality', 'rune_str', 'rune_check_one_of',
-    'rune_zoned_date_time'
+    'rune_add_to_list', 'rune_check_cardinality', 'rune_str',
+    'rune_check_one_of', 'rune_zoned_date_time'
 ]
 
 
@@ -191,13 +190,6 @@ def rune_zoned_date_time(dt_str: str) -> datetime.datetime:
     return dt
 
 
-def _get_rune_object(base_model: str, attribute: str, value: Any) -> Any:
-    model_class = globals()[base_model]
-    instance_kwargs = {attribute: value}
-    instance = model_class(**instance_kwargs)
-    return instance
-
-
 class Multiprop(list):
     ''' A class allowing for dot access to a attribute of all elements of a
         list.
@@ -322,45 +314,7 @@ def rune_filter(items, filter_func):
     return [item for item in (items or []) if filter_func(item)]
 
 
-def rune_set_attr(obj: Any, path: str, value: Any) -> None:
-    '''
-    Sets an attribute of a rune model object to a specified value using a
-    path.
-
-    Parameters:
-    obj (Any): The object whose attribute is to be set.
-    path (str): The path to the attribute, with components separated by '->'.
-    value (Any): The value to set the attribute to.
-
-    Raises:
-    ValueError: If the object or attribute at any level in the path is None.
-    AttributeError: If an invalid attribute path is provided.
-    '''
-    if obj is None:
-        raise ValueError(
-            "Cannot set attribute on a None object in set_rune_attr.")
-
-    path_components = path.split('->')  # Use '->' for splitting the path
-    parent_obj = obj
-
-    # Iterate through the path components, except the last one
-    for attrib in path_components[:-1]:
-        parent_obj = rune_resolve_attr(parent_obj, attrib)
-        if parent_obj is None:
-            raise ValueError(
-                f"Attribute '{attrib}' in the path is None, cannot "
-                "proceed to set value.")
-
-    # Set the value to the last attribute in the path
-    final_attr = path_components[-1]
-    if hasattr(parent_obj, final_attr):
-        setattr(parent_obj, final_attr, value)
-    else:
-        raise AttributeError(f"Invalid attribute '{final_attr}' for object of "
-                             f"type {type(parent_obj).__name__}")
-
-
-def rune_add_attr(obj: Any, attrib: str, value: Any) -> None:
+def rune_add_to_list(rune_list: list, value: Any) -> None:
     '''
     Adds a value to a list-like attribute of a rune model object.
 
@@ -369,16 +323,14 @@ def rune_add_attr(obj: Any, attrib: str, value: Any) -> None:
     attrib (str): The list-like attribute to add the value to.
     value (Any): The value to add to the attribute.
     '''
-    if obj is not None:
-        if hasattr(obj, attrib):
-            current_attr = getattr(obj, attrib)
-            if isinstance(current_attr, list):
-                current_attr.append(value)
-            else:
-                raise TypeError(f"Attribute {attrib} is not list-like.")
+    if isinstance(rune_list, list):
+        if isinstance(value, list):
+            rune_list.extend(value)
         else:
-            setattr(obj, attrib, [value])
+            rune_list.append(value)
     else:
-        raise ValueError("Object for add_rune_attr cannot be None.")
+        raise ValueError(
+            "The rune_list for rune_add_to_list has to be an isntance of list "
+            "and cannot be None.")
 
 # EOF
