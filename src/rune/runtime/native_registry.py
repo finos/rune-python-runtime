@@ -43,9 +43,7 @@ def rune_attempt_register_native_functions(
             module = import_module(module_name)
         except ModuleNotFoundError as exc:
             logging.warning('Native function module import failed: %s', exc)
-            if exc.name == module_name:
-                continue
-            raise
+            continue
 
         native_impl = getattr(module, attr_name, None)
         if native_impl is None or not callable(native_impl):
