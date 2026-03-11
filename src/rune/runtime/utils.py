@@ -352,10 +352,7 @@ class _NullObject:
         return False
 
     def __lt__(self, other):
-        return False
-
-    def __le__(self, other):
-        return False
+        return True
 
 
 _NULLOBJECT = _NullObject()
