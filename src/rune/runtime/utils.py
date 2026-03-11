@@ -15,7 +15,7 @@ __all__ = [
     'rune_join', 'rune_flatten_list', 'rune_resolve_attr',
     'rune_resolve_deep_attr', 'rune_count', 'rune_attr_exists',
     'rune_add_to_list', 'rune_check_cardinality', 'rune_str',
-    'rune_check_one_of', 'rune_zoned_date_time'
+    'rune_check_one_of', 'rune_zoned_date_time', 'rune_wrap_none'
 ]
 
 
@@ -332,5 +332,44 @@ def rune_add_to_list(rune_list: list, value: Any) -> None:
         raise ValueError(
             "The rune_list for rune_add_to_list has to be an isntance of list "
             "and cannot be None.")
+
+
+class _NullObject:
+    '''
+    Replicates the rune null comparison behaviour as defined in:
+    https://github.com/finos/rune-dsl/blob/main/docs/rune-modelling-component.md#comparison-operator-and-null
+    '''
+    def __eq__(self, other):
+        return False
+
+    def __ne__(self, other):
+        return True
+
+    def __gt__(self, other):
+        return False
+
+    def __ge__(self, other):
+        return False
+
+    def __lt__(self, other):
+        return False
+
+    def __le__(self, other):
+        return False
+
+
+_NULLOBJECT = _NullObject()
+
+
+def rune_wrap_none(item):
+    """
+    Return a comparison-safe sentinel for `None` values.
+
+    If `item` is `None`, this returns `NULLOBJECT`; otherwise it returns
+    `item` unchanged.
+    """
+    if item is None:
+        return _NULLOBJECT
+    return item
 
 # EOF
