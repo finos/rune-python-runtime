@@ -7,6 +7,7 @@ from typing import Any, Callable
 
 from rune.runtime.base_data_class import BaseDataClass
 from rune.runtime.object_builder import ObjectBuilder
+from rune.runtime.utils import rune_resolve_attr
 
 __all__ = ["rune_cow", "rune_unwrap"]
 
