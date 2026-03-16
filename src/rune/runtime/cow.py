@@ -7,7 +7,7 @@ from typing import Any, Callable
 
 from rune.runtime.base_data_class import BaseDataClass
 from rune.runtime.object_builder import ObjectBuilder
-from rune.runtime.utils import rune_resolve_attr
+from rune.runtime.utils import rune_mangle_name, rune_resolve_attr
 
 __all__ = ["rune_cow", "rune_unwrap"]
 
@@ -29,6 +29,8 @@ def _wrap_child(value: Any, on_write: Callable[[Any], None] | None) -> Any:
         return _COWDict(value, on_write=on_write)
     if isinstance(value, set):
         return _COWSet(value, on_write=on_write)
+    if isinstance(value, ObjectBuilder):
+        return _COWBuilder(value, on_write=on_write)
     if isinstance(value, BaseDataClass):
         return _COWObject(value, on_write=on_write)
     return value
@@ -99,6 +101,96 @@ class _COWObject(_COWBase):
 
     def __repr__(self) -> str:
         return f"COWObject({self._current()!r})"
+
+
+class _COWBuilder(_COWBase):
+    """Proxy for ObjectBuilder instances with copy-on-write semantics."""
+
+    def __getattr__(self, name: str) -> Any:
+        key = rune_mangle_name(name)
+        target = self._current()
+        if key in target._data:  # pylint: disable=protected-access
+            value = target._data[key]  # pylint: disable=protected-access
+            return _wrap_child(
+                value, lambda new_value, key=key: self._set_key(key, new_value)
+            )
+        return _COWBuilderPath(self, [key])
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        if name.startswith("_"):
+            object.__setattr__(self, name, value)
+            return
+        self._set_key(rune_mangle_name(name), rune_unwrap(value))
+
+    def __getitem__(self, key):
+        current = self._current()
+        value = current[key]
+        return _wrap_child(value, lambda new_value: self._set_item(key, new_value))
+
+    def __setitem__(self, key, value) -> None:
+        self._set_item(key, rune_unwrap(value))
+
+    def _set_item(self, key: str, value: Any) -> None:
+        shadow = self._ensure_shadow()
+        shadow[key] = value
+        self._mark_written()
+
+    def _set_key(self, key: str, value: Any) -> None:
+        shadow = self._ensure_shadow()
+        shadow._data[key] = value  # pylint: disable=protected-access
+        self._mark_written()
+
+    def _set_path_value(self, path: list[str], key: str, value: Any) -> None:
+        shadow = self._ensure_shadow()
+        node = shadow
+        for segment in path:
+            child = node._data.get(segment)  # pylint: disable=protected-access
+            if not isinstance(child, ObjectBuilder):
+                child = ObjectBuilder()
+                node._data[segment] = child  # pylint: disable=protected-access
+            node = child
+        node._data[key] = value  # pylint: disable=protected-access
+        self._mark_written()
+
+    def _rune_get_attr(self, attrib: str) -> Any:
+        target = self._current()
+        value = target._data.get(attrib)  # pylint: disable=protected-access
+        return _wrap_child(
+            value, lambda new_value, key=attrib: self._set_key(key, new_value)
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return rune_unwrap(self).to_dict()
+
+    def to_model(self) -> BaseDataClass:
+        return rune_unwrap(self).to_model()
+
+    def __repr__(self) -> str:
+        return f"COWBuilder({self._current()!r})"
+
+
+class _COWBuilderPath:
+    """Autovivifying path helper for missing ObjectBuilder attributes."""
+
+    __slots__ = ("_root", "_path")
+
+    _root: _COWBuilder
+    _path: list[str]
+
+    def __init__(self, root: _COWBuilder, path: list[str]):
+        object.__setattr__(self, "_root", root)
+        object.__setattr__(self, "_path", path)
+
+    def __getattr__(self, name: str):
+        key = rune_mangle_name(name)
+        return _COWBuilderPath(self._root, self._path + [key])
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        if name in self.__slots__:
+            object.__setattr__(self, name, value)
+            return
+        key = rune_mangle_name(name)
+        self._root._set_path_value(self._path, key, rune_unwrap(value))
 
 
 class _COWList(_COWBase, MutableSequence):

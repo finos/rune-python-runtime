@@ -62,6 +62,37 @@ def test_rune_cow_dict_value_write_does_not_mutate_original():
     assert result["node"].x == 5
 
 
+def test_rune_cow_object_builder_is_isolated_on_write():
+    original = ObjectBuilder(_BuilderModel)
+    original.child.x = 1
+
+    wrapped = rune_cow(original)
+    wrapped.child.x = 9
+
+    assert original.child.x == 1
+
+    result = rune_unwrap(wrapped)
+    assert isinstance(result, ObjectBuilder)
+    assert result.child.x == 9
+
+    model = wrapped.to_model()
+    assert isinstance(model, _BuilderModel)
+    assert model.child.x == 9
+
+
+def test_rune_cow_object_builder_missing_path_write_does_not_mutate_original():
+    original = ObjectBuilder()
+    wrapped = rune_cow(original)
+
+    wrapped.a.b = 7
+
+    assert original.to_dict() == {}
+
+    result = rune_unwrap(wrapped)
+    assert isinstance(result, ObjectBuilder)
+    assert result.to_dict() == {"a": {"b": 7}}
+
+
 def test_rune_unwrap_without_write_returns_original_instance():
     original = _Parent(child=_Child(x=4), ys=[8])
     wrapped = rune_cow(original)

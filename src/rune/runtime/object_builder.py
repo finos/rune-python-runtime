@@ -1,6 +1,7 @@
 '''Draft helpers for dynamic property access.'''
 from __future__ import annotations
 
+import copy
 from typing import Any
 
 from rune.runtime.base_data_class import BaseDataClass
@@ -60,6 +61,15 @@ class ObjectBuilder:
             return self._model_cls.model_validate(data)
         return self._model_cls(**data)
 
+    def __deepcopy__(self, memo):
+        clone = ObjectBuilder(self._model_cls)
+        memo[id(self)] = clone
+        clone._data.update({
+            key: copy.deepcopy(value, memo)
+            for key, value in self._data.items()
+        })
+        return clone
+
     @classmethod
     def _normalize(cls, value: Any) -> Any:
         if isinstance(value, ObjectBuilder):
@@ -103,4 +113,3 @@ class _PathDraft:
                 node._data[seg] = child
             node = child
         node._data[name] = value
-
