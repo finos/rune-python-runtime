@@ -1,8 +1,12 @@
 """Tests for runtime copy-on-write wrappers."""
 from typing import Any
 
+import pytest
+from pydantic import ValidationError
+
 from rune.runtime.base_data_class import BaseDataClass
 from rune.runtime.cow import rune_cow, rune_unwrap
+from rune.runtime.func_proxy import rune_finalize_return
 from rune.runtime.object_builder import ObjectBuilder
 
 
@@ -21,6 +25,10 @@ class _Holder(BaseDataClass):
 
 class _BuilderModel(BaseDataClass):
     child: _Child
+
+
+class _BuilderValueModel(BaseDataClass):
+    value: int
 
 
 def test_rune_cow_model_and_list_are_isolated_on_write():
@@ -133,3 +141,23 @@ def test_rune_unwrap_deep_unwraps_object_builder_payload():
     model = unwrapped_draft.to_model()
     assert isinstance(model, _BuilderModel)
     assert model.child.x == 11
+
+
+def test_rune_finalize_return_materializes_valid_object_builder():
+    draft = ObjectBuilder(_BuilderValueModel)
+    draft.value = 7
+
+    result = rune_finalize_return(draft)
+
+    assert isinstance(result, _BuilderValueModel)
+    assert result.value == 7
+
+
+def test_rune_finalize_return_falls_back_to_builder_on_validation_error():
+    draft = ObjectBuilder(_BuilderValueModel)
+
+    result = rune_finalize_return(draft)
+
+    assert isinstance(result, ObjectBuilder)
+    with pytest.raises(ValidationError):
+        result.to_model()

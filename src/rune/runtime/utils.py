@@ -15,8 +15,7 @@ __all__ = [
     'rune_join', 'rune_flatten_list', 'rune_resolve_attr',
     'rune_resolve_deep_attr', 'rune_count', 'rune_attr_exists',
     'rune_add_to_list', 'rune_check_cardinality', 'rune_str',
-    'rune_check_one_of', 'rune_zoned_date_time', 'rune_wrap_none',
-    'rune_call_unchecked'
+    'rune_check_one_of', 'rune_zoned_date_time', 'rune_wrap_none'
 ]
 
 
@@ -369,23 +368,4 @@ def rune_wrap_none(item):
     if item is None:
         return _NULLOBJECT
     return item
-
-
-def rune_call_unchecked(function: Callable[..., Any], /, *args, **kwargs) -> Any:
-    '''Invoke a callable without pydantic `validate_call` checks when possible.
-
-    If `function` is a replaceable Rune function, the current proxy target is
-    used. If that target is a pydantic `validate_call` wrapper, its
-    `raw_function` is invoked instead. Plain callables are called unchanged.
-    '''
-    if not callable(function):
-        raise TypeError(
-            f'Expected a callable, got {type(function).__name__}')
-
-    proxy = getattr(function, '__proxy__', None)
-    target = proxy.func if proxy is not None else function
-    target = getattr(target, 'raw_function', target)
-
-    return target(*args, **kwargs)
-
 # EOF
