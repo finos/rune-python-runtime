@@ -4,6 +4,7 @@ import logging
 import keyword
 import inspect
 import datetime
+from collections.abc import MutableSequence
 from enum import Enum
 from typing import Callable, Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -121,7 +122,9 @@ def rune_count(obj: Any | None) -> int:
 
 def rune_attr_exists(val: Any) -> bool:
     '''Implements the rune semantics of property existence'''
-    if val is None or val == []:
+    if val is None:
+        return False
+    if isinstance(val, MutableSequence) and len(val) == 0:
         return False
     return True
 
@@ -209,6 +212,9 @@ def _ntoz(v):
     '''Support the lose rune treatment of None in comparisons'''
     if v is None:
         return 0
+    unwrap = getattr(v, '_unwrap', None)
+    if callable(unwrap):
+        v = unwrap()
     return v
 
 
@@ -323,8 +329,8 @@ def rune_add_to_list(rune_list: list, value: Any) -> None:
     attrib (str): The list-like attribute to add the value to.
     value (Any): The value to add to the attribute.
     '''
-    if isinstance(rune_list, list):
-        if isinstance(value, list):
+    if isinstance(rune_list, MutableSequence):
+        if isinstance(value, MutableSequence):
             rune_list.extend(value)
         else:
             rune_list.append(value)
