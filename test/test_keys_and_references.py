@@ -5,6 +5,7 @@ import pytest
 from pydantic import Field, ValidationError
 
 from rune.runtime.base_data_class import BaseDataClass
+from rune.runtime.cow import rune_cow
 from rune.runtime.metadata import Reference, KeyType
 from rune.runtime.metadata import NumberWithMeta, StrWithMeta
 
@@ -219,6 +220,14 @@ def test_ref_assign():
     assert id(model.loan) == id(model.repayment)
 
 
+def test_ref_assign_from_cow_wrapped_object():
+    '''test use a ref from a COW-wrapped object'''
+    model = DummyLoan2(loan=CashFlow(currency='EUR', amount=100),
+                       repayment=CashFlow(currency='EUR', amount=101))
+    model.repayment = Reference(rune_cow(model.loan))
+    assert id(model.loan) == id(model.repayment)
+
+
 def test_ref_in_constructor():
     '''test use a ref'''
     cf = CashFlow(currency='EUR', amount=100)
@@ -246,6 +255,14 @@ def test_ref_ext_assign():
     assert id(model.loan) == id(model.repayment)
 
 
+def test_ref_ext_assign_from_cow_wrapped_object():
+    '''test use an external-key ref from a COW-wrapped object'''
+    model = DummyLoan2(loan=CashFlow(currency='EUR', amount=100),
+                       repayment=CashFlow(currency='EUR', amount=101))
+    model.repayment = Reference(rune_cow(model.loan), 'ext_key1')
+    assert id(model.loan) == id(model.repayment)
+
+
 def test_ref_ext_assign_2():
     '''test use a ext key and ref'''
     model = DummyLoan2(loan=CashFlow(currency='EUR', amount=100),
@@ -255,6 +272,18 @@ def test_ref_ext_assign_2():
     model.repayment = Reference('ext_key3',
                                 key_type=KeyType.EXTERNAL,
                                 parent=model)
+    assert id(model.loan) == id(model.repayment)
+
+
+def test_ref_ext_assign_with_cow_wrapped_parent():
+    '''test external-key lookup through a COW-wrapped parent'''
+    model = DummyLoan2(loan=CashFlow(currency='EUR', amount=100),
+                       repayment=CashFlow(currency='EUR', amount=101))
+    # pylint: disable=no-member
+    model.loan.set_external_key('ext_key3', KeyType.EXTERNAL)
+    model.repayment = Reference('ext_key3',
+                                key_type=KeyType.EXTERNAL,
+                                parent=rune_cow(model))
     assert id(model.loan) == id(model.repayment)
 
 
@@ -361,6 +390,16 @@ def test_reference_object_with_ext_key_defaults_external():
     '''reference defaults to EXTERNAL when ext_key provided'''
     cf = CashFlow(currency='EUR', amount=100)
     ref = Reference(cf, 'ext_key1')
+    assert ref.key_type == KeyType.EXTERNAL
+    assert ref.target is cf
+    assert cf.get_meta('@key:external') == 'ext_key1'
+    assert cf.get_object_by_key('ext_key1', KeyType.EXTERNAL) is cf
+
+
+def test_reference_cow_object_with_ext_key_defaults_external():
+    '''COW-wrapped object refs should still register external keys'''
+    cf = CashFlow(currency='EUR', amount=100)
+    ref = Reference(rune_cow(cf), 'ext_key1')
     assert ref.key_type == KeyType.EXTERNAL
     assert ref.target is cf
     assert cf.get_meta('@key:external') == 'ext_key1'

@@ -36,6 +36,14 @@ def _get_basic_type(annotated_type):
     return annotated_type
 
 
+def _unwrap_cow_proxy(value: Any) -> Any:
+    '''Return the current value behind a copy-on-write proxy, if present.'''
+    unwrap = getattr(value, '_unwrap', None)
+    if callable(unwrap):
+        return unwrap()
+    return value
+
+
 class KeyType(Enum):
     '''Enum for the currently supported by Rune external keys/refs'''
     INTERNAL = 'internal'
@@ -91,6 +99,8 @@ class Reference(BaseReference):
                  ext_key: str | None = None,
                  key_type: KeyType | None = None,
                  parent=None):
+        target = _unwrap_cow_proxy(target)
+        parent = _unwrap_cow_proxy(parent)
         if not isinstance(target, BaseMetaDataMixin) and ext_key:
             raise ValueError('Need to pass an object as target when specifying '
                              'an external key!')
