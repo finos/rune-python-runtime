@@ -73,6 +73,36 @@ class BaseDataClass(BaseModel, ComplexTypeMetaDataMixin):
 
         return NotImplemented
 
+    @classmethod
+    def _unwrap_cow_validation_input(cls, data: Any) -> Any:
+        '''Prepare model inputs by removing COW proxies.
+
+        This intentionally leaves already-materialized BaseDataClass instances
+        untouched so model graphs and parent/reference wiring are not walked
+        during validation. Nested model fields are handled by their own
+        validators when pydantic descends into them.
+        '''
+        if isinstance(data, BaseDataClass):
+            return data
+
+        unwrap = getattr(data, '_unwrap', None)
+        if callable(unwrap):
+            data = unwrap()
+            if isinstance(data, BaseDataClass):
+                return {
+                    name: getattr(data, name)
+                    for name in type(data).__pydantic_fields__.keys()
+                }
+            return data
+
+        return data
+
+    @model_validator(mode='before')
+    @classmethod
+    def _unwrap_cow_inputs(cls, data: Any) -> Any:
+        '''Unwrap copy-on-write proxies before pydantic validation.'''
+        return cls._unwrap_cow_validation_input(data)
+
     @model_serializer(mode='wrap')
     def _serialize_refs(self, serializer, info):
         '''should replace objects with refs while serializing'''
