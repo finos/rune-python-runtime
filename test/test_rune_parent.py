@@ -1,5 +1,5 @@
 '''test module for rune root lifecycle'''
-from typing import Optional, Annotated
+from typing import Optional, Annotated, ClassVar
 from pydantic import Field
 from rune.runtime.metadata import Reference, KeyType
 from rune.runtime.base_data_class import BaseDataClass
@@ -7,17 +7,21 @@ from rune.runtime.base_data_class import BaseDataClass
 
 class B(BaseDataClass):
     '''no doc'''
+    _FQRTN: ClassVar[str] = 'test_rune_parent.B'
     fieldB: str = Field(..., description='')
 
 
 class A(BaseDataClass):
     '''no doc'''
+    _FQRTN: ClassVar[str] = 'test_rune_parent.A'
     b: Annotated[B, B.serializer(),
                  B.validator(('@key:scoped', ))] = Field(..., description='')
 
 
 class Root(BaseDataClass):
     '''no doc'''
+    _FQRTN: ClassVar[str] = 'test.test_rune_parent.Root'
+
     typeA: Optional[Annotated[A, A.serializer(),
                               A.validator()]] = Field(None, description='')
     bAddress: Optional[Annotated[B,
@@ -43,6 +47,7 @@ class Bplus(BaseDataClass):
 
 class RootDeep(BaseDataClass):
     '''no doc'''
+    _FQRTN: ClassVar[str] = 'test_rune_parent.RootDeep'
     typeA: Optional[Annotated[A, A.serializer(),
                               A.validator()]] = Field(None, description='')
     bplus: Optional[Annotated[Bplus,
@@ -52,13 +57,14 @@ class RootDeep(BaseDataClass):
 
 class DeepRef(BaseDataClass):
     '''no doc'''
-    _FQRTN = 'test_rune_parent.DeepRef'
+    _FQRTN: ClassVar[str] = 'test_rune_parent.DeepRef'
     root: Annotated[Root, Root.serializer(),
                     Root.validator()] = Field(..., description='')
 
 
 class DeepRef2(BaseDataClass):
     '''no doc'''
+    _FQRTN: ClassVar[str] = 'test_rune_parent.DeepRef2'
     root: Annotated[Root, Root.serializer(),
                     Root.validator()] = Field(..., description='')
     root2: Annotated[Root, Root.serializer(),
