@@ -210,9 +210,11 @@ class BaseDataClass(BaseModel, ComplexTypeMetaDataMixin):
                     strict=strict,
                     raise_exc=raise_validation_errors)
 
-            root_meta = self.__dict__.setdefault(ROOT_CONTAINER, {})
-            root_meta['@type'] = self._FQRTN
-            root_meta['@model'] = self._FQRTN.split('.', maxsplit=1)[0]
+            root_meta = self.__dict__.setdefault(ROOT_CONTAINER, {})  # type: ignore
+            # root_meta['@type'] = self._FQRTN
+            # root_meta['@model'] = self._FQRTN.split('.', maxsplit=1)[0]
+            root_meta['@type'] = self._fqrtn()
+            root_meta['@model'] = self._fqrtn().split('.', maxsplit=1)[0]
             root_meta['@version'] = self.get_model_version()
 
             return self.model_dump_json(indent=indent,

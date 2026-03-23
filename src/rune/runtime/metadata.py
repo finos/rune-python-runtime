@@ -149,6 +149,11 @@ class BaseMetaDataMixin:
     __meta_check_disabled = False
 
     @classmethod
+    def _fqrtn(cls):
+        '''returns the fully qualified'''
+        return getattr(cls, '_FQRTN', cls.__module__)
+
+    @classmethod
     def enable_meta_checks(cls):
         '''enables the metadata checks in deserialize'''
         BaseMetaDataMixin.__meta_check_disabled = False
@@ -167,9 +172,10 @@ class BaseMetaDataMixin:
         '''is this object a scope for `scoped` keys/references'''
         if not (scope := self._get_rune_scope_type()):
             scope = self._DEFAULT_SCOPE_TYPE
-        if not (fqcn := getattr(self, '_FQRTN', None)):
-            fqcn = f'{self.__class__.__module__}.{self.__class__.__qualname__}'
-        return fqcn == scope
+        # if not (fqcn := getattr(self, '_FQRTN', None)):
+        #     fqcn = f'{self.__class__.__module__}.{self.__class__.__qualname__}'
+        # return fqcn == scope
+        return self._fqrtn() == scope
 
     def set_meta(self, check_allowed=True, **kwds):
         '''set some/all metadata properties'''
@@ -262,7 +268,7 @@ class BaseMetaDataMixin:
         old_val = getattr(self, property_nm)
         allowed_ref_types = getattr(self, '_KEY_REF_CONSTRAINTS', {})
         if (ref.key_type.rune_ref_tag not in allowed_ref_types.get(
-                property_nm, {})): # and not _replaceable(old_val)):
+                property_nm, {})):  # and not _replaceable(old_val)):
             raise ValueError(f'Ref of type {ref.key_type} '
                              f'not allowed for {property_nm}. Allowed types '
                              f'are: {allowed_ref_types.get(property_nm, {})}')
@@ -290,7 +296,10 @@ class BaseMetaDataMixin:
         refs[property_nm] = (ref.target_key, ref.key_type)
 
     def _register_keys(self, metadata):
-        keys = {k: v for k, v in metadata.items() if k.startswith('@key') and v}
+        keys = {
+            k: v
+            for k, v in metadata.items() if k.startswith('@key') and v
+        }
         for key_t, key_v in keys.items():
             self._get_object_map(KeyType.from_rune(key_t))[key_v] = self
 
@@ -387,7 +396,8 @@ class ComplexTypeMetaDataMixin(BaseMetaDataMixin):
         res |= obj.model_dump(exclude_unset=True, exclude_defaults=True)
         if cls != obj.__class__:
             # pylint: disable=protected-access
-            res = {'@type': obj._FQRTN} | res
+            # res = {'@type': obj._FQRTN} | res
+            res = {'@type': obj._fqrtn()} | res
         return res
 
     @classmethod
