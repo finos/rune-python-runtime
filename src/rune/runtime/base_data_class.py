@@ -380,57 +380,6 @@ class BaseDataClass(BaseModel, ComplexTypeMetaDataMixin):
                      err)
         return exceptions
 
-    def add_to_list_attribute(self, attr_name: str, value) -> None:
-        '''
-        Adds a value to a list attribute, ensuring the value is of an allowed
-        type.
-
-        Parameters:
-        attr_name (str): Name of the list attribute.
-        value: Value to add to the list.
-
-        Raises:
-        AttributeError: If the attribute name is not found or not a list.
-        TypeError: If the value type is not one of the allowed types.
-        '''
-        if not hasattr(self, attr_name):
-            raise AttributeError(f"Attribute {attr_name} not found.")
-
-        attr = getattr(self, attr_name)
-        if not isinstance(attr, list):
-            raise AttributeError(f"Attribute {attr_name} is not a list.")
-
-        # Get allowed types for the list elements
-        allowed_types = self.get_allowed_types_for_list_field(attr_name)
-
-        # Check if value is an instance of one of the allowed types
-        if not isinstance(value, allowed_types):
-            raise TypeError(f"Value must be an instance of {allowed_types}, "
-                            f"not {type(value)}")
-
-        attr.append(value)
-
-    @classmethod
-    def get_allowed_types_for_list_field(cls, field_name: str):
-        '''
-        Gets the allowed types for a list field in a Pydantic model, supporting
-        both Union and | operator.
-
-        Parameters:
-        cls (type): The Pydantic model class.
-        field_name (str): The field name.
-
-        Returns:
-        tuple: A tuple of allowed types.
-        '''
-        field_type = cls.__annotations__.get(field_name)
-        if field_type and get_origin(field_type) is list:
-            list_elem_type = get_args(field_type)[0]
-            if get_origin(list_elem_type):
-                return get_args(list_elem_type)
-            return (list_elem_type, )  # Single type or | operator used
-        return ()
-
     @classmethod
     def get_model_version(cls):
         ''' Attempt to obtain the Rune model version, in case of a failure,
