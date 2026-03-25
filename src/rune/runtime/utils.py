@@ -212,23 +212,23 @@ class Multiprop(list):
         return res
 
 
-def _ntoz(v):
-    '''Support the lose rune treatment of None in comparisons'''
+def _cmp_operand(v):
+    '''Unwrap proxies and normalize `None` for Rune comparisons.'''
     if v is None:
-        return 0
+        return rune_wrap_none(v)
     unwrap = getattr(v, '_unwrap', None)
     if callable(unwrap):
         v = unwrap()
-    return v
+    return rune_wrap_none(v)
 
 
 _cmp = {
-    '=': lambda x, y: _ntoz(x) == _ntoz(y),
-    '<>': lambda x, y: _ntoz(x) != _ntoz(y),
-    '>=': lambda x, y: _ntoz(x) >= _ntoz(y),
-    '<=': lambda x, y: _ntoz(x) <= _ntoz(y),
-    '>': lambda x, y: _ntoz(x) > _ntoz(y),
-    '<': lambda x, y: _ntoz(x) < _ntoz(y)
+    '=': lambda x, y: _cmp_operand(x) == _cmp_operand(y),
+    '<>': lambda x, y: _cmp_operand(x) != _cmp_operand(y),
+    '>=': lambda x, y: _cmp_operand(x) >= _cmp_operand(y),
+    '<=': lambda x, y: _cmp_operand(x) <= _cmp_operand(y),
+    '>': lambda x, y: _cmp_operand(x) > _cmp_operand(y),
+    '<': lambda x, y: _cmp_operand(x) < _cmp_operand(y)
 }
 
 
@@ -268,7 +268,7 @@ def rune_join(lst, sep=''):
 
 
 def rune_any_elements(lhs, op, rhs) -> bool:
-    '''Checks if to lists have any common element(s)'''
+    '''Checks whether any element pair satisfies the comparison.'''
     cmp = _cmp[op]
     op1 = _to_list(lhs)
     op2 = _to_list(rhs)
@@ -362,6 +362,9 @@ class _NullObject:
         return False
 
     def __lt__(self, other):
+        return True
+
+    def __le__(self, other):
         return True
 
 

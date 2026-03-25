@@ -10,6 +10,7 @@ from rune.runtime.func_proxy import (
 )
 from rune.runtime.utils import (
     rune_any_elements,
+    rune_all_elements,
     rune_check_cardinality,
     rune_check_one_of,
     rune_flatten_list,
@@ -88,6 +89,33 @@ def test_rune_flatten_list_accepts_nested_cow_wrapped_lists():
     wrapped = rune_cow([[1, 2], [3]])
 
     assert rune_flatten_list(wrapped) == [1, 2, 3]
+
+
+def test_rune_all_elements_treats_none_as_never_equal():
+    assert rune_all_elements(None, "=", None) is False
+    assert rune_all_elements(None, "=", 0) is False
+
+
+def test_direct_not_equals_treats_none_as_not_equal():
+    assert (not rune_all_elements(None, "=", None)) is True
+    assert (not rune_all_elements(None, "=", 0)) is True
+
+
+def test_direct_not_equals_uses_pairwise_list_semantics():
+    assert (not rune_all_elements([1, 2], "=", [1, 2])) is False
+    assert (not rune_all_elements([1, 2], "=", [2, 1])) is True
+    assert (not rune_all_elements([1], "=", [1, 2])) is True
+    assert (not rune_all_elements([], "=", [])) is False
+
+
+def test_direct_not_equals_uses_pairwise_list_semantics_for_cow_lists():
+    assert (not rune_all_elements(rune_cow([1, 2]), "=", rune_cow([1, 2]))) is False
+    assert (not rune_all_elements(rune_cow([1, 2]), "=", rune_cow([2, 1]))) is True
+
+
+def test_rune_any_elements_keeps_cartesian_not_equals_semantics():
+    assert rune_any_elements([1, 2], "<>", [1, 2]) is True
+    assert rune_any_elements([], "<>", []) is False
 
 
 def test_rune_check_one_of_treats_empty_cow_list_as_absent_in_frame():
