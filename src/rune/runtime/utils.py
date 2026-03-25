@@ -101,11 +101,10 @@ def rune_resolve_deep_attr(obj: Any | None,
 def rune_check_one_of(obj, *attr_names, necessity=True) -> bool:
     '''Checks that one and only one attribute is set.'''
     if inspect.isframe(obj):
-        values = getattr(obj, 'f_locals')
+        vals = [obj.f_locals.get(n) for n in attr_names]
     else:
-        values = obj.model_dump()
-    vals = [values.get(n) for n in attr_names]
-    n_attr = sum(1 for v in vals if v is not None and v != [])
+        vals = [getattr(obj, n, None) for n in attr_names]
+    n_attr = sum(1 for v in vals if rune_attr_exists(v))
     if necessity and n_attr != 1:
         logging.error('One and only one of %s should be set!', attr_names)
         return False

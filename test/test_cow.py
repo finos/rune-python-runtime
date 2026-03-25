@@ -5,6 +5,7 @@ import pytest
 from pydantic import ValidationError
 
 from rune.runtime.base_data_class import BaseDataClass
+from rune.runtime.conditions import rune_condition
 from rune.runtime.cow import rune_cow, rune_unwrap
 from rune.runtime.func_proxy import rune_finalize_return
 from rune.runtime.object_builder import ObjectBuilder
@@ -29,6 +30,18 @@ class _BuilderModel(BaseDataClass):
 
 class _BuilderValueModel(BaseDataClass):
     value: int
+
+
+class _ConditionalChild(BaseDataClass):
+    x: int
+
+    @rune_condition
+    def positive(self):
+        return self.x > 0
+
+
+class _ConditionalParent(BaseDataClass):
+    children: list[_ConditionalChild]
 
 
 def test_rune_cow_model_and_list_are_isolated_on_write():
@@ -57,6 +70,30 @@ def test_rune_cow_nested_list_element_write_does_not_mutate_original():
     result = rune_unwrap(wrapped)
     assert result[0].x == 7
     assert result[1].x == 2
+
+
+def test_rune_cow_list_slice_nested_write_does_not_mutate_original():
+    original = [_Child(x=1), _Child(x=2)]
+    wrapped = rune_cow(original)
+
+    sliced = wrapped[:1]
+    sliced[0].x = 9
+
+    assert original[0].x == 1
+    result = rune_unwrap(wrapped)
+    assert [child.x for child in result] == [9, 2]
+
+
+def test_rune_cow_list_slice_append_updates_parent_copy_only():
+    original = [_Child(x=1), _Child(x=2)]
+    wrapped = rune_cow(original)
+
+    sliced = wrapped[:1]
+    sliced.append(_Child(x=3))
+
+    assert [child.x for child in original] == [1, 2]
+    result = rune_unwrap(wrapped)
+    assert [child.x for child in result] == [1, 3, 2]
 
 
 def test_rune_cow_dict_value_write_does_not_mutate_original():
@@ -161,3 +198,12 @@ def test_rune_finalize_return_falls_back_to_builder_on_validation_error():
     assert isinstance(result, ObjectBuilder)
     with pytest.raises(ValidationError):
         result.to_model()
+
+
+def test_validate_conditions_recurses_into_cow_list_fields():
+    parent = _ConditionalParent(children=[_ConditionalChild(x=1)])
+    parent.children = rune_cow([_ConditionalChild(x=-1)])
+
+    errors = parent.validate_conditions(raise_exc=False)
+
+    assert len(errors) == 1

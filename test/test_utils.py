@@ -1,4 +1,5 @@
 """Tests for runtime utility helpers."""
+import inspect
 
 from rune.runtime.base_data_class import BaseDataClass
 from rune.runtime.cow import rune_cow, rune_unwrap
@@ -10,6 +11,7 @@ from rune.runtime.func_proxy import (
 from rune.runtime.utils import (
     rune_any_elements,
     rune_check_cardinality,
+    rune_check_one_of,
     rune_flatten_list,
     rune_get_only_element,
 )
@@ -21,6 +23,11 @@ class _UncheckedChild(BaseDataClass):
 
 class _UncheckedParent(BaseDataClass):
     child: _UncheckedChild
+
+
+class _OneOfHolder(BaseDataClass):
+    items: list[int] | None = None
+    label: str | None = None
 
 
 def test_rune_call_unchecked_wraps_plain_callable_return():
@@ -81,3 +88,20 @@ def test_rune_flatten_list_accepts_nested_cow_wrapped_lists():
     wrapped = rune_cow([[1, 2], [3]])
 
     assert rune_flatten_list(wrapped) == [1, 2, 3]
+
+
+def test_rune_check_one_of_treats_empty_cow_list_as_absent_in_frame():
+    items = rune_cow([])
+    label = "x"
+    frame = inspect.currentframe()
+
+    assert frame is not None
+    assert rune_check_one_of(frame, "items", "label") is True
+
+
+def test_rune_check_one_of_treats_empty_cow_list_as_absent_on_model():
+    holder = _OneOfHolder()
+    holder.items = rune_cow([])
+    holder.label = "x"
+
+    assert rune_check_one_of(holder, "items", "label") is True

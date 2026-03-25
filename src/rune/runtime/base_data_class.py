@@ -1,4 +1,5 @@
 '''Base class for all Rune type classes'''
+from collections.abc import MutableSequence
 import logging
 import importlib
 import copy
@@ -396,13 +397,16 @@ class BaseDataClass(BaseModel, ComplexTypeMetaDataMixin):
 
 def _validate_conditions_recursively(obj, raise_exc=True):
     '''Helper to execute conditions recursively on a model.'''
+    unwrap = getattr(obj, '_unwrap', None)
+    if callable(unwrap):
+        obj = unwrap()
     if not obj:
         return []
     if isinstance(obj, BaseDataClass):
         return obj.validate_conditions(
             recursively=True,  # type:ignore
             raise_exc=raise_exc)
-    if isinstance(obj, (list, tuple)):
+    if isinstance(obj, (tuple, MutableSequence)):
         exc = []
         for item in obj:
             exc += _validate_conditions_recursively(item, raise_exc=raise_exc)

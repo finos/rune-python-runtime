@@ -202,9 +202,9 @@ class _COWList(_COWBase, MutableSequence):
     def __getitem__(self, index):
         current = self._current()
         value = current[index]
-        if isinstance(index, slice):
-            return value
-        return _wrap_child(value, lambda new_value: self._set_item(index, new_value))
+        return _wrap_child(
+            value, lambda new_value, index=index: self._set_item(index, new_value)
+        )
 
     def __setitem__(self, index, value) -> None:
         self._set_item(index, rune_unwrap(value))
