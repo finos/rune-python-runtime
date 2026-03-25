@@ -28,8 +28,13 @@ def if_cond_fn(ifexpr: bool, thenexpr: Callable, elseexpr: Callable) -> Any:
     return expr()
 
 
-def _to_list(obj) -> list | tuple:
-    if isinstance(obj, (list, tuple)):
+def _is_rune_list_like(obj: Any) -> bool:
+    '''Return whether an object should follow Rune list semantics.'''
+    return isinstance(obj, (tuple, MutableSequence))
+
+
+def _to_list(obj: Any) -> tuple[Any, ...] | MutableSequence[Any]:
+    if _is_rune_list_like(obj):
         return obj
     return (obj, )
 
@@ -278,7 +283,7 @@ def rune_check_cardinality(prop, inf: int, sup: int | None = None) -> bool:
     '''
     if not prop:
         prop_card = 0
-    elif isinstance(prop, (list, tuple)):
+    elif _is_rune_list_like(prop):
         prop_card = len(prop)
     else:
         prop_card = 1
@@ -293,7 +298,7 @@ def rune_get_only_element(collection):
     ''' Returns the single element of a collection, if the list contains more
         more than one element or is empty, None is returned.
     '''
-    if isinstance(collection, (list, tuple)) and len(collection) == 1:
+    if _is_rune_list_like(collection) and len(collection) == 1:
         return collection[0]
     return None
 

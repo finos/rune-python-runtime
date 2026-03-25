@@ -1,11 +1,17 @@
 """Tests for runtime utility helpers."""
 
 from rune.runtime.base_data_class import BaseDataClass
-from rune.runtime.cow import rune_unwrap
+from rune.runtime.cow import rune_cow, rune_unwrap
 from rune.runtime.func_proxy import (
     replaceable,
     rune_call_unchecked,
     rune_call_unchecked_raw,
+)
+from rune.runtime.utils import (
+    rune_any_elements,
+    rune_check_cardinality,
+    rune_flatten_list,
+    rune_get_only_element,
 )
 
 
@@ -61,3 +67,17 @@ def test_rune_call_unchecked_wraps_replaceable_callable_return():
     result = rune_unwrap(wrapped)
     assert isinstance(result, _UncheckedParent)
     assert result.child.x == 7
+
+
+def test_list_helpers_accept_cow_wrapped_lists():
+    wrapped = rune_cow([1, 2, 3])
+
+    assert rune_any_elements(wrapped, "=", 2) is True
+    assert rune_check_cardinality(wrapped, 3, 3) is True
+    assert rune_get_only_element(rune_cow([9])) == 9
+
+
+def test_rune_flatten_list_accepts_nested_cow_wrapped_lists():
+    wrapped = rune_cow([[1, 2], [3]])
+
+    assert rune_flatten_list(wrapped) == [1, 2, 3]
