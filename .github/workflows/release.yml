@@ -43,4 +43,5 @@ jobs:
         with:
           # This tells the action to upload everything in dist/, 
           # including the signatures, but skip internal 'checks' on them.
+          verify-metadata: false
           packages-dir: dist/
