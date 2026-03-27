@@ -20,28 +20,16 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.x"
+          python-version: ">=3.12"
 
       - name: Build Wheel and SDist
         run: |
-          pip install build twine
+          pip install build
           python -m build
-
-      # RUN THE CHECK HERE (Before signing)
-      - name: Check distributions
-        run: twine check dist/*
-
-      - name: Sign the artifacts with Sigstore
-        uses: sigstore/gh-action-sigstore-python@v3.0.0
-        with:
-          inputs: >-
-            ./dist/*.whl
-            ./dist/*.tar.gz
 
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
-          # This tells the action to upload everything in dist/, 
-          # including the signatures, but skip internal 'checks' on them.
-          verify-metadata: false
-          packages-dir: dist/
+          # This replaces the manual sigstore step. 
+          # It signs and uploads attestations automatically.
+          attestations: true
