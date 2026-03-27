@@ -24,8 +24,12 @@ jobs:
 
       - name: Build Wheel and SDist
         run: |
-          pip install build
+          pip install build twine
           python -m build
+
+      # RUN THE CHECK HERE (Before signing)
+      - name: Check distributions
+        run: twine check dist/*
 
       - name: Sign the artifacts with Sigstore
         uses: sigstore/gh-action-sigstore-python@v3.0.0
@@ -36,4 +40,7 @@ jobs:
 
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
-        # No username/password needed! It uses the id-token above.
+        with:
+          # This tells the action to upload everything in dist/, 
+          # including the signatures, but skip internal 'checks' on them.
+          packages-dir: dist/
