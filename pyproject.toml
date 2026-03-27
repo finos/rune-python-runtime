@@ -12,8 +12,8 @@ dependencies = [
    "tzdata>=2025.2"
 ]
 optional-dependencies.dev = [
-    "pytest>=8.4.1",
-    "pytest-cov>=6.2.1",
+    "pytest>=9.0.2",
+    "pytest-cov>=7.0.0",
     "pytest-mock>=3.14.1",
     "types-python-dateutil>=2.9.0.20250809"
 ]
@@ -23,7 +23,7 @@ keywords = [
     "rune",
     "rune runtime",
 ]
-license = { text = "APACHE 2.0" }
+license = "Apache-2.0"
 authors = [
     { name = "Daniel Schwartz" },
     { name = "Plamen Neykov" },
@@ -32,19 +32,17 @@ authors = [
 classifiers = [
     "Development Status :: 6 - Mature",
     "Intended Audience :: Developers",
-    "License :: OSI Approved :: Apache 2.0 License",
+    "License :: OSI Approved :: Apache Software License",
     "Operating System :: MacOS",
     "Operating System :: Microsoft :: Windows",
     "Operating System :: POSIX",
     "Operating System :: Unix",
     "Programming Language :: Python :: 3 :: Only",
-    "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
     "Topic :: Software Development :: Libraries",
-    "Topic :: Software Development :: Rune DSL",
-    "Topic :: Software Development :: Rune DSL Runtime"
+    "Topic :: Software Development :: Libraries :: Python Modules"
 ]
 
 [tool.setuptools.packages.find]
