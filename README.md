@@ -11,6 +11,7 @@ The Rune Python Runtime is used in collaboration with the [Rune Python Code Gene
 ## Installation
 
 The runtime is not generally installed on a stand alone basis but rather comes as part of a generated package such as CDM.
+However, pip install `rune-runtime` would install it from PyPi.
 
 Regardless, to install the package standalone:
 
