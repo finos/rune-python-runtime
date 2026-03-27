@@ -3,7 +3,7 @@ requires = ["setuptools>=64", "setuptools_scm>=8", "wheel>=0.45.1", "pytest-runn
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "rune.runtime"
+name = "rune-runtime"
 dynamic = ["version"]
 requires-python = ">=3.11"
 dependencies = [
