@@ -7,12 +7,10 @@ on:
 jobs:
   build-and-publish:
     runs-on: ubuntu-latest
-    environment: pypi
+    environment: release
     permissions:
       # CRITICAL: This allows Trusted Publishing (OIDC)
       id-token: write
-      # This allows Sigstore to write the signature to the release
-      contents: write
 
     steps:
       - uses: actions/checkout@v4
@@ -32,4 +30,5 @@ jobs:
         with:
           # This replaces the manual sigstore step. 
           # It signs and uploads attestations automatically.
-          attestations: true
+          packages-dir: ./dist/          
+          verbose: true
