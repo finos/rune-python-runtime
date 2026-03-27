@@ -27,3 +27,4 @@ src/rune.runtime.egg-info
 rune.runtime-*.whl
 src/rune/runtime/version.py
 /.coverage
+src/rune_runtime.egg-info
