@@ -1,4 +1,4 @@
-name: Release and Sign
+name: Publish to PyPi
 
 on:
   release:
@@ -7,7 +7,7 @@ on:
 jobs:
   build-and-publish:
     runs-on: ubuntu-latest
-    environment: release
+    environment: pypi
     permissions:
       # CRITICAL: This allows Trusted Publishing (OIDC)
       id-token: write
