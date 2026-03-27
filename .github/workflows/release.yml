@@ -1,0 +1,39 @@
+name: Release and Sign
+
+on:
+  release:
+    types: [published]
+
+jobs:
+  build-and-publish:
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      # CRITICAL: This allows Trusted Publishing (OIDC)
+      id-token: write
+      # This allows Sigstore to write the signature to the release
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: Build Wheel and SDist
+        run: |
+          pip install build
+          python -m build
+
+      - name: Sign the artifacts with Sigstore
+        uses: sigstore/gh-action-sigstore-python@v3.0.0
+        with:
+          inputs: >-
+            ./dist/*.whl
+            ./dist/*.tar.gz
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        # No username/password needed! It uses the id-token above.
