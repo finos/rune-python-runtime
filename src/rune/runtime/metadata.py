@@ -151,7 +151,25 @@ class BaseMetaDataMixin:
     @classmethod
     def _fqrtn(cls):
         '''returns the fully qualified'''
-        return getattr(cls, '_FQRTN', cls.__module__)
+        if explicit_fqrtn := getattr(cls, '_FQRTN', None):
+            return explicit_fqrtn
+
+        module_name = cls.__module__
+        if prefix := cls._get_rune_namespace_prefix():
+            prefixed_module = prefix + '.'
+            if module_name.startswith(prefixed_module):
+                return module_name[len(prefixed_module):]
+        return module_name
+
+    @classmethod
+    def _get_rune_namespace_prefix(cls) -> str | None:
+        try:
+            module = importlib.import_module(
+                cls.__module__.split('.', maxsplit=1)[0])
+            return getattr(module, 'rune_namespace_prefix', None)
+        # pylint: disable=bare-except
+        except:  # noqa
+            return None
 
     @classmethod
     def enable_meta_checks(cls):
@@ -382,10 +400,19 @@ class BaseMetaDataMixin:
 class ComplexTypeMetaDataMixin(BaseMetaDataMixin):
     '''metadata support for complex types'''
     @classmethod
-    def _type_to_cls(cls, metadata:dict[str, Any]):
+    def _type_to_cls(cls,
+                     metadata:dict[str, Any],
+                     namespace_prefix: str | None = None):
         if rune_type:= metadata.pop('@type', None):
             rune_class_name = rune_type.rsplit('.', maxsplit=1)[-1]
-            rune_module = importlib.import_module(rune_type)
+            import_path = rune_type
+            prefix = namespace_prefix
+            if prefix is None:
+                prefix = cls._get_rune_namespace_prefix()
+            if prefix:
+                if not rune_type.startswith(prefix + '.'):
+                    import_path = prefix + '.' + rune_type
+            rune_module = importlib.import_module(import_path)
             return getattr(rune_module, rune_class_name)
         return cls  # support for legacy json
 

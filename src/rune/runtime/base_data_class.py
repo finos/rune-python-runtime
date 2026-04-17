@@ -236,7 +236,8 @@ class BaseDataClass(BaseModel, ComplexTypeMetaDataMixin):
                          validate_model: bool = True,
                          check_rune_constraints: bool = True,
                          strict: bool = False,
-                         raise_validation_errors: bool = True) -> BaseModel:
+                         raise_validation_errors: bool = True,
+                         namespace_prefix: str | None = None) -> BaseModel:
         # pylint: disable=line-too-long
         '''Rune compliant deserialization
 
@@ -257,6 +258,12 @@ class BaseDataClass(BaseModel, ComplexTypeMetaDataMixin):
             `raise_validation_errors (bool, optional):` Raise an exception in
             case a validation error has occurred. Defaults to True.
 
+            `namespace_prefix (str | None, optional):` Prefix to prepend to
+            the Rune `@type` value when resolving Python import paths during
+            deserialization when called via `BaseDataClass`. Concrete
+            generated root classes use the prefix from their own package.
+            Defaults to None.
+
         #### Returns:
             `BaseModel:` The Rune model.
         '''
@@ -273,13 +280,18 @@ class BaseDataClass(BaseModel, ComplexTypeMetaDataMixin):
             rune_dict = copy.deepcopy(rune_data)
         rune_dict.pop('@version', None)
         rune_dict.pop('@model', None)
-        rune_cls = cls._type_to_cls(rune_dict)
+        rune_prefix = cls._get_rune_namespace_prefix()
+        if rune_prefix is None and cls is BaseDataClass:
+            rune_prefix = namespace_prefix
+        rune_cls = cls._type_to_cls(rune_dict,
+                                    namespace_prefix=rune_prefix)
         model = rune_cls.model_validate(rune_dict, strict=strict)
         model.resolve_references(ignore_dangling=False, recurse=True)
         if validate_model:
-            model.validate_model(check_rune_constraints=check_rune_constraints,
-                                 strict=strict,
-                                 raise_exc=raise_validation_errors)
+            model.validate_model(
+                check_rune_constraints=check_rune_constraints,
+                strict=strict,
+                raise_exc=raise_validation_errors)
         return model
 
     def resolve_references(self, ignore_dangling=False, recurse=True):
