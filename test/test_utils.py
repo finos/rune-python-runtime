@@ -133,13 +133,3 @@ def test_rune_check_one_of_treats_empty_cow_list_as_absent_on_model():
     holder.label = "x"
 
     assert rune_check_one_of(holder, "items", "label") is True
-
-
-from mitest.rosetta_dsl.test.functions.native.functions.RoundToNearest import RoundToNearest
-from mitest.rosetta_dsl.test.functions.native.RoundingModeEnum import RoundingModeEnum
-
-# from rune.native.rosetta_dsl.test.functions.native.functions.RoundToNearest import RoundToNearest
-def test_native_invokation():
-    res = RoundToNearest(100.345678, 3, RoundingModeEnum.UP)
-    print(res)
-    pass
