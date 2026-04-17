@@ -1,8 +1,53 @@
 '''func proxy'''
-import inspect
 import functools
+import inspect
+from contextlib import contextmanager
+from typing import Any, Callable
 
-__all__ = ['FuncProxy', 'replaceable', 'create_module_attr_guardian']
+from pydantic import ValidationError
+
+from rune.runtime.cow import rune_cow, rune_unwrap
+from rune.runtime.object_builder import ObjectBuilder
+
+__all__ = [
+    'FuncProxy', 'replaceable', 'create_module_attr_guardian',
+    'rune_finalize_return', 'rune_call_unchecked_raw', 'rune_call_unchecked'
+]
+
+
+def rune_finalize_return(value: Any) -> Any:
+    '''Finalize function return values by unwrapping and materializing drafts.'''
+    unwrapped = rune_unwrap(value)
+    if isinstance(unwrapped, ObjectBuilder):
+        try:
+            return unwrapped.to_model()
+        except ValidationError:
+            return unwrapped
+    return unwrapped
+
+
+def rune_call_unchecked_raw(function: Callable[..., Any], /, *args,
+                            **kwargs) -> Any:
+    '''Invoke a callable without pydantic `validate_call` checks when possible.
+
+    If `function` is a replaceable Rune function, the current proxy target is
+    used. If that target is a pydantic `validate_call` wrapper, its
+    `raw_function` is invoked instead. The raw result is returned unchanged.
+    '''
+    if not callable(function):
+        raise TypeError(
+            f'Expected a callable, got {type(function).__name__}')
+
+    proxy = getattr(function, '__proxy__', None)
+    target = proxy.func if proxy is not None else function
+    target = getattr(target, 'raw_function', target)
+
+    return target(*args, **kwargs)
+
+
+def rune_call_unchecked(function: Callable[..., Any], /, *args, **kwargs) -> Any:
+    '''Invoke a callable unchecked and return a COW-wrapped result.'''
+    return rune_cow(rune_call_unchecked_raw(function, *args, **kwargs))
 
 
 class FuncProxy:
@@ -14,7 +59,7 @@ class FuncProxy:
 
     def __call__(self, *args, **kwargs):
         '''pass the call to the current function'''
-        return self._func(*args, **kwargs)
+        return rune_finalize_return(self._func(*args, **kwargs))
 
     @property
     def func(self):
@@ -50,7 +95,27 @@ def replaceable(func):
         return proxy(*args, **kwargs)
 
     wrapper.__assign__ = proxy.__assign__  # type: ignore
+    wrapper.__proxy__ = proxy   # type: ignore
     return wrapper
+
+
+@contextmanager
+def scoped_replace(proxy_func, replacement):
+    ''' Temporarily replace a replaceable function and restore after use.
+        Raises TypeError if not replaceable.
+    '''
+    if not (hasattr(proxy_func, "__assign__")
+            and hasattr(proxy_func, "__proxy__")):
+        raise TypeError(
+            "Function is not replaceable (missing __assign__/__proxy__).")
+
+    proxy = proxy_func.__proxy__
+    original = proxy.func
+    proxy.func = replacement
+    try:
+        yield
+    finally:
+        proxy.func = original
 
 
 def create_module_attr_guardian(module):

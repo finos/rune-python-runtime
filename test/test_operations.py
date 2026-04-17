@@ -1,7 +1,6 @@
 '''Tests of various rune runtime functions'''
 import datetime
-from rune.runtime.utils import (rune_any_elements, rune_join,
-                                rune_all_elements, rune_count, rune_filter,
+from rune.runtime.utils import (rune_join, rune_all_elements, rune_count, rune_filter,
                                 rune_resolve_attr, rune_attr_exists,
                                 rune_flatten_list)
 # pylint: disable=invalid-name
@@ -28,7 +27,7 @@ def test_binary_operations():
     res = self.eventType == "CLRG"
     assert res
     # not_equals
-    res = rune_any_elements(self.actionType, "<>", "NEWT")
+    res = not rune_all_elements(self.actionType, "=", "NEWT")
     assert not res
     res = self.actionType != "NEWT"
     assert not res

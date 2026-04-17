@@ -1,4 +1,5 @@
 '''Base class for all Rune type classes'''
+from collections.abc import MutableSequence
 import logging
 import importlib
 import copy
@@ -48,6 +49,60 @@ class BaseDataClass(BaseModel, ComplexTypeMetaDataMixin):
             if isinstance(value, BaseMetaDataMixin):
                 value._set_rune_parent(self)
             super().__setattr__(name, value)
+
+    def __eq__(self, other: Any) -> bool:
+        if isinstance(other, BaseModel):
+            # Align with Pydantic's equality semantics but avoid parent recursion
+            self_type = self.__pydantic_generic_metadata__['origin'] or self.__class__
+            other_type = other.__pydantic_generic_metadata__['origin'] or other.__class__
+
+            if not (
+                self_type == other_type
+                and getattr(self, '__pydantic_private__', None)
+                == getattr(other, '__pydantic_private__', None)
+                and self.__pydantic_extra__ == other.__pydantic_extra__
+            ):
+                return False
+
+            model_fields = type(self).__pydantic_fields__.keys()
+            if not model_fields:
+                return True
+            _missing = object()
+            self_vals = tuple(self.__dict__.get(k, _missing) for k in model_fields)
+            other_vals = tuple(other.__dict__.get(k, _missing) for k in model_fields)
+            return self_vals == other_vals
+
+        return NotImplemented
+
+    @classmethod
+    def _unwrap_cow_validation_input(cls, data: Any) -> Any:
+        '''Prepare model inputs by removing COW proxies.
+
+        This intentionally leaves already-materialized BaseDataClass instances
+        untouched so model graphs and parent/reference wiring are not walked
+        during validation. Nested model fields are handled by their own
+        validators when pydantic descends into them.
+        '''
+        if isinstance(data, BaseDataClass):
+            return data
+
+        unwrap = getattr(data, '_unwrap', None)
+        if callable(unwrap):
+            data = unwrap()
+            if isinstance(data, BaseDataClass):
+                return {
+                    name: getattr(data, name)
+                    for name in type(data).__pydantic_fields__.keys()
+                }
+            return data
+
+        return data
+
+    @model_validator(mode='before')
+    @classmethod
+    def _unwrap_cow_inputs(cls, data: Any) -> Any:
+        '''Unwrap copy-on-write proxies before pydantic validation.'''
+        return cls._unwrap_cow_validation_input(data)
 
     @model_serializer(mode='wrap')
     def _serialize_refs(self, serializer, info):
@@ -156,9 +211,11 @@ class BaseDataClass(BaseModel, ComplexTypeMetaDataMixin):
                     strict=strict,
                     raise_exc=raise_validation_errors)
 
-            root_meta = self.__dict__.setdefault(ROOT_CONTAINER, {})
-            root_meta['@type'] = self._FQRTN
-            root_meta['@model'] = self._FQRTN.split('.', maxsplit=1)[0]
+            root_meta = self.__dict__.setdefault(ROOT_CONTAINER, {})  # type: ignore
+            # root_meta['@type'] = self._FQRTN
+            # root_meta['@model'] = self._FQRTN.split('.', maxsplit=1)[0]
+            root_meta['@type'] = self._fqrtn()
+            root_meta['@model'] = self._fqrtn().split('.', maxsplit=1)[0]
             root_meta['@version'] = self.get_model_version()
 
             return self.model_dump_json(indent=indent,
@@ -179,7 +236,8 @@ class BaseDataClass(BaseModel, ComplexTypeMetaDataMixin):
                          validate_model: bool = True,
                          check_rune_constraints: bool = True,
                          strict: bool = False,
-                         raise_validation_errors: bool = True) -> BaseModel:
+                         raise_validation_errors: bool = True,
+                         namespace_prefix: str | None = None) -> BaseModel:
         # pylint: disable=line-too-long
         '''Rune compliant deserialization
 
@@ -200,6 +258,12 @@ class BaseDataClass(BaseModel, ComplexTypeMetaDataMixin):
             `raise_validation_errors (bool, optional):` Raise an exception in
             case a validation error has occurred. Defaults to True.
 
+            `namespace_prefix (str | None, optional):` Prefix to prepend to
+            the Rune `@type` value when resolving Python import paths during
+            deserialization when called via `BaseDataClass`. Concrete
+            generated root classes use the prefix from their own package.
+            Defaults to None.
+
         #### Returns:
             `BaseModel:` The Rune model.
         '''
@@ -216,13 +280,18 @@ class BaseDataClass(BaseModel, ComplexTypeMetaDataMixin):
             rune_dict = copy.deepcopy(rune_data)
         rune_dict.pop('@version', None)
         rune_dict.pop('@model', None)
-        rune_cls = cls._type_to_cls(rune_dict)
+        rune_prefix = cls._get_rune_namespace_prefix()
+        if rune_prefix is None and cls is BaseDataClass:
+            rune_prefix = namespace_prefix
+        rune_cls = cls._type_to_cls(rune_dict,
+                                    namespace_prefix=rune_prefix)
         model = rune_cls.model_validate(rune_dict, strict=strict)
         model.resolve_references(ignore_dangling=False, recurse=True)
         if validate_model:
-            model.validate_model(check_rune_constraints=check_rune_constraints,
-                                 strict=strict,
-                                 raise_exc=raise_validation_errors)
+            model.validate_model(
+                check_rune_constraints=check_rune_constraints,
+                strict=strict,
+                raise_exc=raise_validation_errors)
         return model
 
     def resolve_references(self, ignore_dangling=False, recurse=True):
@@ -324,57 +393,6 @@ class BaseDataClass(BaseModel, ComplexTypeMetaDataMixin):
                      err)
         return exceptions
 
-    def add_to_list_attribute(self, attr_name: str, value) -> None:
-        '''
-        Adds a value to a list attribute, ensuring the value is of an allowed
-        type.
-
-        Parameters:
-        attr_name (str): Name of the list attribute.
-        value: Value to add to the list.
-
-        Raises:
-        AttributeError: If the attribute name is not found or not a list.
-        TypeError: If the value type is not one of the allowed types.
-        '''
-        if not hasattr(self, attr_name):
-            raise AttributeError(f"Attribute {attr_name} not found.")
-
-        attr = getattr(self, attr_name)
-        if not isinstance(attr, list):
-            raise AttributeError(f"Attribute {attr_name} is not a list.")
-
-        # Get allowed types for the list elements
-        allowed_types = self.get_allowed_types_for_list_field(attr_name)
-
-        # Check if value is an instance of one of the allowed types
-        if not isinstance(value, allowed_types):
-            raise TypeError(f"Value must be an instance of {allowed_types}, "
-                            f"not {type(value)}")
-
-        attr.append(value)
-
-    @classmethod
-    def get_allowed_types_for_list_field(cls, field_name: str):
-        '''
-        Gets the allowed types for a list field in a Pydantic model, supporting
-        both Union and | operator.
-
-        Parameters:
-        cls (type): The Pydantic model class.
-        field_name (str): The field name.
-
-        Returns:
-        tuple: A tuple of allowed types.
-        '''
-        field_type = cls.__annotations__.get(field_name)
-        if field_type and get_origin(field_type) is list:
-            list_elem_type = get_args(field_type)[0]
-            if get_origin(list_elem_type):
-                return get_args(list_elem_type)
-            return (list_elem_type, )  # Single type or | operator used
-        return ()
-
     @classmethod
     def get_model_version(cls):
         ''' Attempt to obtain the Rune model version, in case of a failure,
@@ -391,13 +409,16 @@ class BaseDataClass(BaseModel, ComplexTypeMetaDataMixin):
 
 def _validate_conditions_recursively(obj, raise_exc=True):
     '''Helper to execute conditions recursively on a model.'''
+    unwrap = getattr(obj, '_unwrap', None)
+    if callable(unwrap):
+        obj = unwrap()
     if not obj:
         return []
     if isinstance(obj, BaseDataClass):
         return obj.validate_conditions(
             recursively=True,  # type:ignore
             raise_exc=raise_exc)
-    if isinstance(obj, (list, tuple)):
+    if isinstance(obj, (tuple, MutableSequence)):
         exc = []
         for item in obj:
             exc += _validate_conditions_recursively(item, raise_exc=raise_exc)

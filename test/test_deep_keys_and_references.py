@@ -69,4 +69,56 @@ def test_fail_wrong_key_int():
     with pytest.raises(ValueError):
         Root(typeA=a, bAddress=Reference(a.b))
 
+
+def test_scoped_reference_metadata_and_type():
+    '''scoped refs should store key type and metadata'''
+    b = B(fieldB='some b content')
+    a = A(b=b)
+    root = Root(typeA=a, bAddress=Reference(a.b, 'aKeyScoped', KeyType.SCOPED))
+    assert b.get_meta('@key:scoped') == 'aKeyScoped'
+    assert root.__dict__['__rune_references']['bAddress'][1] == KeyType.SCOPED
+
+
+def test_ref_prefers_scoped_over_internal():
+    '''scoped ref should be preferred when both tags are provided'''
+    rune_dict = {
+        "bAddress": {
+            "@ref": "internalKey",
+            "@ref:scoped": "scopedKey"
+        },
+        "typeA": {
+            "b": {
+                "@key:scoped": "scopedKey",
+                "fieldB": "some b content"
+            }
+        },
+    }
+    root = Root.model_validate(rune_dict)
+    assert root.bAddress == root.typeA.b
+    assert root.__dict__['__rune_references']['bAddress'][1] == KeyType.SCOPED
+
+
+def test_invalid_multiple_ref_tags_raise():
+    '''unknown multiple ref tags should raise'''
+    rune_dict = {
+        "bAddress": {
+            "@ref:foo": "key1",
+            "@ref:bar": "key2"
+        }
+    }
+    with pytest.raises(ValueError):
+        Root.model_validate(rune_dict)
+
+
+def test_scoped_key_not_visible_outside_scope(mocker):
+    '''scoped keys should not leak across scope instances'''
+    mocker.patch('rune.runtime.metadata.BaseMetaDataMixin._DEFAULT_SCOPE_TYPE',
+                 'test_deep_keys_and_references.Root')
+    b = B(fieldB='some b content')
+    a = A(b=b)
+    Root(typeA=a, bAddress=Reference(a.b, 'aKeyScoped', KeyType.SCOPED))
+    root2 = Root.model_validate({"bAddress": {"@ref:scoped": "aKeyScoped"}})
+    with pytest.raises(KeyError):
+        root2.resolve_references(ignore_dangling=False, recurse=False)
+
 # EOF

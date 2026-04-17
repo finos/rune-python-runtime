@@ -1,5 +1,5 @@
 '''test module for rune root lifecycle'''
-from typing import Optional, Annotated
+from typing import Optional, Annotated, ClassVar
 from pydantic import Field
 from rune.runtime.metadata import Reference, KeyType
 from rune.runtime.base_data_class import BaseDataClass
@@ -7,17 +7,21 @@ from rune.runtime.base_data_class import BaseDataClass
 
 class B(BaseDataClass):
     '''no doc'''
+    _FQRTN: ClassVar[str] = 'test_rune_parent.B'
     fieldB: str = Field(..., description='')
 
 
 class A(BaseDataClass):
     '''no doc'''
+    _FQRTN: ClassVar[str] = 'test_rune_parent.A'
     b: Annotated[B, B.serializer(),
                  B.validator(('@key:scoped', ))] = Field(..., description='')
 
 
 class Root(BaseDataClass):
     '''no doc'''
+    _FQRTN: ClassVar[str] = 'test.test_rune_parent.Root'
+
     typeA: Optional[Annotated[A, A.serializer(),
                               A.validator()]] = Field(None, description='')
     bAddress: Optional[Annotated[B,
@@ -43,6 +47,7 @@ class Bplus(BaseDataClass):
 
 class RootDeep(BaseDataClass):
     '''no doc'''
+    _FQRTN: ClassVar[str] = 'test_rune_parent.RootDeep'
     typeA: Optional[Annotated[A, A.serializer(),
                               A.validator()]] = Field(None, description='')
     bplus: Optional[Annotated[Bplus,
@@ -52,13 +57,14 @@ class RootDeep(BaseDataClass):
 
 class DeepRef(BaseDataClass):
     '''no doc'''
-    _FQRTN = 'test_rune_parent.DeepRef'
+    _FQRTN: ClassVar[str] = 'test_rune_parent.DeepRef'
     root: Annotated[Root, Root.serializer(),
                     Root.validator()] = Field(..., description='')
 
 
 class DeepRef2(BaseDataClass):
     '''no doc'''
+    _FQRTN: ClassVar[str] = 'test_rune_parent.DeepRef2'
     root: Annotated[Root, Root.serializer(),
                     Root.validator()] = Field(..., description='')
     root2: Annotated[Root, Root.serializer(),
@@ -96,7 +102,7 @@ def test_deep_creation():
 def test_deep2_creation(mocker):
     '''no doc'''
     mocker.patch('rune.runtime.metadata.BaseMetaDataMixin._DEFAULT_SCOPE_TYPE',
-                 'test_rune_parent.Root')
+                 'test.test_rune_parent.Root')
     b = B(fieldB='some b content')
     a = A(b=b)
     b2 = B(fieldB='2 some other b content')
@@ -138,7 +144,6 @@ def test_root_deserialization():
     assert root.typeA == root.typeA.b.get_rune_parent()
     assert root.typeA == root.bAddress.get_rune_parent()
     assert root.typeA.b == root.bAddress
-
 
 
 def test_root_deep_deserialization():

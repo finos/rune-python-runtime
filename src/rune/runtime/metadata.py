@@ -36,6 +36,14 @@ def _get_basic_type(annotated_type):
     return annotated_type
 
 
+def _unwrap_cow_proxy(value: Any) -> Any:
+    '''Return the current value behind a copy-on-write proxy, if present.'''
+    unwrap = getattr(value, '_unwrap', None)
+    if callable(unwrap):
+        return unwrap()
+    return value
+
+
 class KeyType(Enum):
     '''Enum for the currently supported by Rune external keys/refs'''
     INTERNAL = 'internal'
@@ -78,13 +86,21 @@ class KeyType(Enum):
         return KeyType(rune_type)
 
 
-class Reference:
+class BaseReference:
+    ''' A base class allowing for Refrence and UnresolvedReference to be used 
+        in model construction
+    '''
+
+
+class Reference(BaseReference):
     '''manages a reference to a object with a key'''
     def __init__(self,
                  target: str | Any,
                  ext_key: str | None = None,
                  key_type: KeyType | None = None,
                  parent=None):
+        target = _unwrap_cow_proxy(target)
+        parent = _unwrap_cow_proxy(parent)
         if not isinstance(target, BaseMetaDataMixin) and ext_key:
             raise ValueError('Need to pass an object as target when specifying '
                              'an external key!')
@@ -105,6 +121,10 @@ class Reference:
             key_type = key_type or KeyType.EXTERNAL
             self.target_key = target
             self.key_type = key_type
+            if not parent:
+                raise ValueError('When creating a reference only with an '
+                                 'external key, a parent object must be '
+                                 'specified!')
             self.target = parent.get_object_by_key(target, key_type)
 
     def get_reference(self, _):
@@ -112,7 +132,7 @@ class Reference:
         return self
 
 
-class UnresolvedReference:
+class UnresolvedReference(BaseReference):
     '''used by the deserialization to hold temporarily unresolved references'''
     def __init__(self, key):
         rune_type, self.key = list(key.items())[0]
@@ -127,6 +147,29 @@ class BaseMetaDataMixin:
     '''Base class for the meta data support of basic amd complex types'''
     _DEFAULT_SCOPE_TYPE = 'cdm.event.common.TradeState'
     __meta_check_disabled = False
+
+    @classmethod
+    def _fqrtn(cls):
+        '''returns the fully qualified'''
+        if explicit_fqrtn := getattr(cls, '_FQRTN', None):
+            return explicit_fqrtn
+
+        module_name = cls.__module__
+        if prefix := cls._get_rune_namespace_prefix():
+            prefixed_module = prefix + '.'
+            if module_name.startswith(prefixed_module):
+                return module_name[len(prefixed_module):]
+        return module_name
+
+    @classmethod
+    def _get_rune_namespace_prefix(cls) -> str | None:
+        try:
+            module = importlib.import_module(
+                cls.__module__.split('.', maxsplit=1)[0])
+            return getattr(module, 'rune_namespace_prefix', None)
+        # pylint: disable=bare-except
+        except:  # noqa
+            return None
 
     @classmethod
     def enable_meta_checks(cls):
@@ -147,9 +190,10 @@ class BaseMetaDataMixin:
         '''is this object a scope for `scoped` keys/references'''
         if not (scope := self._get_rune_scope_type()):
             scope = self._DEFAULT_SCOPE_TYPE
-        if not (fqcn := getattr(self, '_FQRTN', None)):
-            fqcn = f'{self.__class__.__module__}.{self.__class__.__qualname__}'
-        return fqcn == scope
+        # if not (fqcn := getattr(self, '_FQRTN', None)):
+        #     fqcn = f'{self.__class__.__module__}.{self.__class__.__qualname__}'
+        # return fqcn == scope
+        return self._fqrtn() == scope
 
     def set_meta(self, check_allowed=True, **kwds):
         '''set some/all metadata properties'''
@@ -180,21 +224,24 @@ class BaseMetaDataMixin:
                 raise
         return key
 
-    def set_external_key(self, key: str, key_type: KeyType):
+    def set_external_key(self,
+                         key: str,
+                         key_type: KeyType = KeyType.EXTERNAL) -> Self:
         '''registers this object under the provided external key'''
         aux = self.get_meta(key_type.key_tag)
         if aux and aux != key:
             raise ValueError(f'This object already has an external key {aux}!'
                              f'Can\'t change it to {key}')
         if aux == key:
-            return
+            return self
 
-        self.set_meta(**{key_type.key_tag: key})
+        self.set_meta(check_allowed=True, **{key_type.key_tag: key})
         try:
             self._get_object_map(key_type)[key] = self
         except:  # noqa
-            self.set_meta(**{key_type.key_tag: None})
+            self.set_meta(check_allowed=True, **{key_type.key_tag: None})
             raise
+        return self
 
     def get_object_by_key(self, key: str, key_type: KeyType):
         '''retrieve an object with a key an key type'''
@@ -239,7 +286,7 @@ class BaseMetaDataMixin:
         old_val = getattr(self, property_nm)
         allowed_ref_types = getattr(self, '_KEY_REF_CONSTRAINTS', {})
         if (ref.key_type.rune_ref_tag not in allowed_ref_types.get(
-                property_nm, {}) and not _replaceable(old_val)):
+                property_nm, {})):  # and not _replaceable(old_val)):
             raise ValueError(f'Ref of type {ref.key_type} '
                              f'not allowed for {property_nm}. Allowed types '
                              f'are: {allowed_ref_types.get(property_nm, {})}')
@@ -267,7 +314,10 @@ class BaseMetaDataMixin:
         refs[property_nm] = (ref.target_key, ref.key_type)
 
     def _register_keys(self, metadata):
-        keys = {k: v for k, v in metadata.items() if k.startswith('@key') and v}
+        keys = {
+            k: v
+            for k, v in metadata.items() if k.startswith('@key') and v
+        }
         for key_t, key_v in keys.items():
             self._get_object_map(KeyType.from_rune(key_t))[key_v] = self
 
@@ -350,10 +400,19 @@ class BaseMetaDataMixin:
 class ComplexTypeMetaDataMixin(BaseMetaDataMixin):
     '''metadata support for complex types'''
     @classmethod
-    def _type_to_cls(cls, metadata:dict[str, Any]):
+    def _type_to_cls(cls,
+                     metadata:dict[str, Any],
+                     namespace_prefix: str | None = None):
         if rune_type:= metadata.pop('@type', None):
             rune_class_name = rune_type.rsplit('.', maxsplit=1)[-1]
-            rune_module = importlib.import_module(rune_type)
+            import_path = rune_type
+            prefix = namespace_prefix
+            if prefix is None:
+                prefix = cls._get_rune_namespace_prefix()
+            if prefix:
+                if not rune_type.startswith(prefix + '.'):
+                    import_path = prefix + '.' + rune_type
+            rune_module = importlib.import_module(import_path)
             return getattr(rune_module, rune_class_name)
         return cls  # support for legacy json
 
@@ -364,7 +423,8 @@ class ComplexTypeMetaDataMixin(BaseMetaDataMixin):
         res |= obj.model_dump(exclude_unset=True, exclude_defaults=True)
         if cls != obj.__class__:
             # pylint: disable=protected-access
-            res = {'@type': obj._FQRTN} | res
+            # res = {'@type': obj._FQRTN} | res
+            res = {'@type': obj._fqrtn()} | res
         return res
 
     @classmethod

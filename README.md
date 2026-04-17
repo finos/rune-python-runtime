@@ -13,26 +13,6 @@ The Rune Python Runtime is used in collaboration with the [Rune Python Code Gene
 The runtime is not generally installed on a stand alone basis but rather comes as part of a generated package such as CDM.
 However, pip install `rune-runtime` would install it from PyPi.
 
-Regardless, to install the package standalone:
-
-1. Fetch the latest release data from the GitHub API
-```sh
-release_data=$(curl -s https://api.github.com/repos/REGnosys/rune-python-runtime/releases/latest)
-```
-2. Extract the download URL of the first asset
-```sh
-download_url=$(echo "$release_data" | grep '"browser_download_url":' | head -n 1 | sed -E 's/.*"([^"]+)".*/\1/')
-```
-3. Download the artifact using wget or curl
-```sh
-wget "$download_url"
-```
-
-4. Install the Runtime
-```sh
-python -m pip install rune.runtime*-py3-*.whl
-```
-
 ## Development setup
 ### Setup for developers
 This guide is meant for everyone who wants to contribute to the Rune Python Runtime and needs to get things up and running.
@@ -62,7 +42,7 @@ The Roadmap will be aligned to the Rune DSL and [CDM](https://github.com/finos/c
 In addition, the intention is to make future releases available at [PyPi](https://pypi.org)
 
 ## Contributors
-- [CLOUDRISK Limited](https://www.cloudrisk.uk), email: info@cloudrisk.com
+- [CLOUDRISK Limited](https://www.cloudrisk.uk), email: info@cloudrisk.co.uk
 - [FT Advisory LLC](https://www.ftadvisory.co), email: info@ftadvisory.co
 - [TradeHeader SL](https://www.tradeheader.com), email: info@tradeheader.com
 
