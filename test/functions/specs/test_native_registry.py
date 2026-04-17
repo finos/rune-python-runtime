@@ -14,6 +14,8 @@ def test_attempt_register_native_functions_custom_package():
     registered = rune_attempt_register_native_functions(
         ["native_registry.rune_register_native"],
         native_pacakge="rune.runtime",
+        rune_namespace_prefix=None,
+        rune_gen_name_conv=False,
     )
     assert registered == ["native_registry.rune_register_native"]
 
@@ -40,6 +42,8 @@ def test_attempt_register_native_functions_logs(caplog):
                 "native_registry._NATIVE_REGISTRY",
             ],
             native_pacakge="rune.runtime",
+            rune_namespace_prefix=None,
+            rune_gen_name_conv=False,
         )
 
     messages = [record.getMessage() for record in caplog.records]
@@ -52,6 +56,8 @@ def test_attempt_register_native_functions_custom_package_short_native():
     registered = rune_attempt_register_native_functions(
         ["rune_register_native"],
         native_pacakge="rune.runtime.native_registry",
+        rune_namespace_prefix=None,
+        rune_gen_name_conv=False,
     )
     assert registered == ["rune_register_native"]
 

@@ -33,7 +33,10 @@ def rune_deregister_native(function_name: str) -> None:
 def rune_attempt_register_native_functions(
     function_names: list[str],
     native_pacakge="rune.native",
-    rune_namespace_prefix='finos',
+    rune_namespace_prefix: str | None = 'finos',
+    # the generator specifies only the module path and assumes that teh function
+    # is named as the last module in the path
+    rune_gen_name_conv=True,
 ) -> list[str]:
     """Attempt to import and register native implementations for named functions."""
     registered: list[str] = []
@@ -42,7 +45,9 @@ def rune_attempt_register_native_functions(
     for function_name in function_names:
         parts = function_name.split('.')
         attr_name = parts[-1]
-        module_name = '.'.join([native_pacakge]+parts)
+        if not rune_gen_name_conv:
+            parts = parts[:-1]  # remove the function name from the path
+        module_name = '.'.join([native_pacakge] + parts)
         try:
             module = import_module(module_name)
         except ModuleNotFoundError as exc:
