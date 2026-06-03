@@ -251,6 +251,13 @@ class BaseMetaDataMixin:
         '''the parent object'''
         return self.__dict__.get(PARENT_PROP)
 
+    def resolve_ref(self, property_name: str) -> Any:
+        ''' if the property exists and it is a reference, return the reference,
+            otherwise return None
+        '''
+        refs = self._get_rune_refs_container()
+        return refs.get(property_name, [None])[0]
+
     def _get_meta_container(self) -> dict[str, Any]:
         return self.__dict__.get(META_CONTAINER, {})
 
