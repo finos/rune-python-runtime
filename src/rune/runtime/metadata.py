@@ -251,7 +251,7 @@ class BaseMetaDataMixin:
         '''the parent object'''
         return self.__dict__.get(PARENT_PROP)
 
-    def resolve_ref(self, property_name: str) -> Any:
+    def resolve_ref_key(self, property_name: str) -> Any:
         ''' if the property exists and it is a reference, return the reference,
             otherwise return None
         '''
