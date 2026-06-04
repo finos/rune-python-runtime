@@ -11,7 +11,7 @@ from pydantic import (BaseModel, ValidationError, ConfigDict, model_serializer,
 from pydantic.main import IncEx
 from rune.runtime.conditions import ConditionViolationError
 from rune.runtime.conditions import get_conditions
-from rune.runtime.metadata import (ComplexTypeMetaDataMixin, Reference,
+from rune.runtime.metadata import (REFS_CONTAINER, ComplexTypeMetaDataMixin, Reference,
                                    UnresolvedReference, BaseMetaDataMixin,
                                    _EnumWrapper, RUNE_OBJ_MAPS)
 
@@ -122,6 +122,11 @@ class BaseDataClass(BaseModel, ComplexTypeMetaDataMixin):
         obj = handler(data)
         obj._init_rune_parent()  # pylint: disable=protected-access
         obj.resolve_references(ignore_dangling=True, recurse=False)
+        # transfer refs that were established on the original before 
+        # re-validation wiped them
+        if isinstance(data, BaseDataClass) and not obj._get_rune_refs_container():
+            if original_refs := data._get_rune_refs_container():
+                obj.__dict__[REFS_CONTAINER] = dict(original_refs)
         return obj
 
     def _init_rune_parent(self):
