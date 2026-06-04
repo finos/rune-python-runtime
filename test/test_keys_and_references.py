@@ -275,6 +275,18 @@ def test_ref_ext_assign_2():
     assert id(model.loan) == id(model.repayment)
 
 
+def test_resolve_ref_key_returns_reference_key():
+    '''resolve_ref returns the stored reference key'''
+    model = DummyLoan2(loan=CashFlow(currency='EUR', amount=100),
+                       repayment=CashFlow(currency='EUR', amount=101))
+    assert model.resolve_ref_key('repayment') is None
+
+    model.repayment = Reference(model.loan, 'loan-ref-key')
+
+    assert model.resolve_ref_key('repayment') == 'loan-ref-key'
+    assert model.resolve_ref_key('loan') is None
+
+
 def test_ref_ext_assign_with_cow_wrapped_parent():
     '''test external-key lookup through a COW-wrapped parent'''
     model = DummyLoan2(loan=CashFlow(currency='EUR', amount=100),
