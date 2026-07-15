@@ -16,8 +16,8 @@ AC_DIR=$($PY_EXE -c "import sys;print('Scripts' if sys.platform.startswith('win'
 source .pytest/$AC_DIR/activate
 # after the above, use directly python as it will be on the path
 
-python -m pip install pytest
-python -m pip install rune.runtime*-py3-*.whl
+python -m pip install pytest pytest-mock
+python -m pip install rune_runtime*-py3-*.whl
 
 # run tests
 python -m pytest -p no:cacheprovider test/
