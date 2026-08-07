@@ -406,7 +406,7 @@ class BaseDataClass(BaseModel, ComplexTypeMetaDataMixin):
         try:
             module = importlib.import_module(
                 cls.__module__.split('.', maxsplit=1)[0])
-            return getattr(module, 'rune_model_version', default='0.0.0')
+            return getattr(module, 'rune_model_version', '0.0.0')
         # pylint: disable=bare-except
         except:  # noqa
             return '0.0.0'
