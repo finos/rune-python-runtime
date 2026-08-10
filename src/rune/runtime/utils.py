@@ -16,7 +16,8 @@ __all__ = [
     'rune_join', 'rune_flatten_list', 'rune_resolve_attr',
     'rune_resolve_deep_attr', 'rune_count', 'rune_attr_exists',
     'rune_add_to_list', 'rune_check_cardinality', 'rune_str',
-    'rune_check_one_of', 'rune_zoned_date_time', 'rune_wrap_none'
+    'rune_check_one_of', 'rune_zoned_date_time', 'rune_wrap_none',
+    'rune_resolve_attr_values'
 ]
 
 
@@ -96,6 +97,20 @@ def rune_resolve_deep_attr(obj: Any | None,
         if container_obj := rune_resolve_attr(obj, container_nm):
             return getter_fn(container_obj, attrib)
     return None
+
+
+def rune_resolve_attr_values(
+    items: Iterable[Any] | None,
+    attrib: str,
+) -> list[Any]:
+    """Resolve an attribute once per item and omit None results."""
+    source = () if items is None else items
+
+    return [
+        value
+        for item in source
+        if (value := rune_resolve_attr(item, attrib)) is not None
+    ]
 
 
 def rune_check_one_of(obj, *attr_names, necessity=True) -> bool:
