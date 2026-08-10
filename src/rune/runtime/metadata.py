@@ -437,6 +437,9 @@ class ComplexTypeMetaDataMixin(BaseMetaDataMixin):
     @classmethod
     def deserialize(cls, obj, allowed_meta: set[str]):
         '''method used as pydantic `validator`'''
+        if isinstance(obj, list):
+            return [cls.deserialize(item, allowed_meta) for item in obj]
+
         if isinstance(obj, cls):
             if cls.meta_checks_enabled():
                 obj._init_meta(allowed_meta)  # pylint: disable=protected-access
@@ -510,6 +513,10 @@ class BasicTypeMetaDataMixin(BaseMetaDataMixin):
     @classmethod
     def deserialize(cls, obj, handler, base_types, allowed_meta: set[str]):
         '''method used as pydantic `validator`'''
+        if isinstance(obj, list):
+            identity = lambda x: x  # noqa: E731
+            processed = [cls.deserialize(item, identity, base_types, allowed_meta) for item in obj]
+            return handler(processed)
         model = obj
         if isinstance(obj, base_types) and not isinstance(obj, cls):
             model = cls(obj)  # type: ignore
@@ -687,6 +694,8 @@ class EnumWithMetaMixin:
     @classmethod
     def deserialize(cls, obj, allowed_meta: set[str]):
         '''method used as pydantic `validator`'''
+        if isinstance(obj, list):
+            return [cls.deserialize(item, allowed_meta) for item in obj]
         model = obj
         if (isinstance(obj, str)
                 and not isinstance(obj, _EnumWrapper)):

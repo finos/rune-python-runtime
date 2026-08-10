@@ -119,6 +119,10 @@ class BaseDataClass(BaseModel, ComplexTypeMetaDataMixin):
     def _deserialize_refs(cls, data: Any,
                           handler: ModelWrapValidatorHandler[Self]) -> Self:
         '''should resolve refs after creation'''
+        if isinstance(data, dict):
+            metadata = {k: v for k, v in data.items() if k.startswith('@')}
+            if aux := cls._create_unresolved_ref(metadata):
+                return aux
         obj = handler(data)
         obj._init_rune_parent()  # pylint: disable=protected-access
         obj.resolve_references(ignore_dangling=True, recurse=False)
