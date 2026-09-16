@@ -125,6 +125,15 @@ class BaseDataClass(BaseModel, ComplexTypeMetaDataMixin):
                 return aux
         obj = handler(data)
         obj._init_rune_parent()  # pylint: disable=protected-access
+        if isinstance(data, dict):
+            # Deferred annotations can bypass the field metadata validator.
+            # Retain target keys before resolving references to this model.
+            keys = {k: v for k, v in metadata.items() if k.startswith('@key')}
+            if keys:
+                # Field-level validators handle allowed metadata, including
+                # scoped keys that are not declared on the target class.
+                obj.set_meta(check_allowed=False, **keys)
+                obj._register_keys(keys)  # pylint: disable=protected-access
         obj.resolve_references(ignore_dangling=True, recurse=False)
         # transfer refs that were established on the original before 
         # re-validation wiped them
@@ -140,9 +149,12 @@ class BaseDataClass(BaseModel, ComplexTypeMetaDataMixin):
             self.__dict__[RUNE_OBJ_MAPS] = {}
 
         for prop_nm, obj in self.__dict__.items():
-            if (isinstance(obj, BaseMetaDataMixin)
-                    and not prop_nm.startswith('__') and prop_nm not in refs):
-                obj._set_rune_parent(self)  # pylint: disable=protected-access
+            if prop_nm.startswith('__') or prop_nm in refs:
+                continue
+            children = obj if isinstance(obj, (MutableSequence, tuple)) else (obj,)
+            for child in children:
+                if isinstance(child, BaseMetaDataMixin):
+                    child._set_rune_parent(self)  # pylint: disable=protected-access
 
     def rune_serialize(
         self,
@@ -306,11 +318,17 @@ class BaseDataClass(BaseModel, ComplexTypeMetaDataMixin):
     def resolve_references(self, ignore_dangling=False, recurse=True):
         '''resolves all attributes which are references'''
         if recurse:
+            resolved_refs = self._get_rune_refs_container()
             for prop_nm, obj in self.__dict__.items():
-                if (isinstance(obj, BaseDataClass)
-                        and not prop_nm.startswith('__')):
-                    obj.resolve_references(ignore_dangling=ignore_dangling,
-                                           recurse=recurse)
+                # Follow containment only; resolved references can point back
+                # to an ancestor and must not be traversed again.
+                if prop_nm.startswith('__') or prop_nm in resolved_refs:
+                    continue
+                children = obj if isinstance(obj, (MutableSequence, tuple)) else (obj,)
+                for child in children:
+                    if isinstance(child, BaseDataClass):
+                        child.resolve_references(ignore_dangling=ignore_dangling,
+                                                 recurse=recurse)
 
         refs = []
         for prop_nm, obj in self.__dict__.items():

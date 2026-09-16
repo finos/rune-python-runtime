@@ -1,8 +1,9 @@
 '''test module for ref lifecycle'''
+from collections import UserList
 from typing import Optional, Annotated
 from pydantic import Field
 import pytest
-from rune.runtime.metadata import Reference, KeyType
+from rune.runtime.metadata import Reference, KeyType, UnresolvedReference
 from rune.runtime.base_data_class import BaseDataClass
 
 
@@ -33,6 +34,128 @@ class DeepRef(BaseDataClass):
     '''no doc'''
     root: Annotated[Root, Root.serializer(),
                     Root.validator()] = Field(..., description='')
+
+
+class ListedReferences(BaseDataClass):
+    '''References and their targets occur in separate list fields.'''
+    references: list[Annotated[Root, Root.validator()]]
+    targets: list[Annotated[A, A.validator()]]
+
+
+class NestedListedReferences(BaseDataClass):
+    '''Exercise lists below both model fields and other lists.'''
+    groups: list[Annotated[ListedReferences, ListedReferences.validator()]]
+    labels: list[str] = Field(default_factory=list)
+
+
+class SequenceContainer(BaseDataClass):
+    '''Keep sequence implementations intact during validation.'''
+    entries: object
+
+
+class CyclicReference(BaseDataClass):
+    '''A resolved reference can point back to its containing object.'''
+    _ALLOWED_METADATA = {'@key'}
+    target: Annotated[BaseDataClass, BaseDataClass.validator(('@ref', ))]
+    _KEY_REF_CONSTRAINTS = {'target': {'@ref'}}
+
+
+@pytest.fixture
+def listed_reference_data():
+    '''A forward reference to a target in a sibling list.'''
+    return {
+        'groups': [{
+            'references': [
+                {'bAddress': {'@ref:scoped': 'first'}},
+                {'bAddress': {'@ref:scoped': 'second'}},
+            ],
+            'targets': [
+                {'b': {'@key:scoped': 'first', 'fieldB': 'first target'}},
+                {'b': {'@key:scoped': 'second', 'fieldB': 'second target'}},
+            ],
+        }],
+        'labels': ['primitive list entries are ignored'],
+    }
+
+
+def test_list_children_share_parent_and_key_maps(listed_reference_data):
+    '''Keys from list children must be visible to sibling list entries.'''
+    model = NestedListedReferences.model_validate(listed_reference_data)
+    group = model.groups[0]
+
+    assert group.get_rune_parent() is model
+    for reference, target in zip(group.references, group.targets):
+        assert reference.get_rune_parent() is group
+        assert target.get_rune_parent() is group
+        key = target.b.get_meta('@key:scoped')
+        assert reference.get_object_by_key(key, KeyType.SCOPED) is target.b
+
+
+def test_deserialize_and_validate_references_in_nested_lists(listed_reference_data):
+    '''Rune deserialization resolves every list entry before validation.'''
+    model = NestedListedReferences.rune_deserialize(listed_reference_data)
+    group = model.groups[0]
+
+    for reference, target in zip(group.references, group.targets):
+        assert reference.bAddress is target.b
+        assert reference.resolve_ref_key('bAddress') == target.b.get_meta('@key:scoped')
+    assert model.validate_model() == []
+
+    model.resolve_references()
+    for reference, target in zip(group.references, group.targets):
+        assert reference.bAddress is target.b
+
+
+def test_resolve_list_references_respects_recurse_false(listed_reference_data):
+    '''Nonrecursive resolution leaves child references untouched.'''
+    model = NestedListedReferences.model_validate(listed_reference_data)
+
+    model.resolve_references(recurse=False)
+
+    assert all(isinstance(ref.bAddress, UnresolvedReference)
+               for ref in model.groups[0].references)
+
+
+def test_resolve_list_references_respects_ignore_dangling(listed_reference_data):
+    '''Missing list references may be ignored or reported by the caller.'''
+    listed_reference_data['groups'][0]['references'][1]['bAddress'] = {
+        '@ref:scoped': 'missing-key'
+    }
+    model = NestedListedReferences.model_validate(listed_reference_data)
+
+    model.resolve_references(ignore_dangling=True)
+
+    group = model.groups[0]
+    assert group.references[0].bAddress is group.targets[0].b
+    assert isinstance(group.references[1].bAddress, UnresolvedReference)
+    with pytest.raises(KeyError, match='missing-key'):
+        model.resolve_references(ignore_dangling=False)
+
+
+@pytest.mark.parametrize('sequence_type', [list, tuple, UserList])
+def test_resolve_references_in_sequence_types(sequence_type):
+    '''Supported sequences provide both parent wiring and reference traversal.'''
+    reference = Root.model_validate({'bAddress': {'@ref:scoped': 'target'}})
+    target = A.model_validate({'b': {'@key:scoped': 'target', 'fieldB': 'value'}})
+    model = SequenceContainer(entries=sequence_type([reference, target, 'label', None]))
+
+    model.resolve_references()
+
+    assert reference.get_rune_parent() is model
+    assert target.get_rune_parent() is model
+    assert reference.bAddress is target.b
+
+
+def test_resolve_references_skips_resolved_cycles_in_lists():
+    '''Repeated resolution must not recurse through an already-bound reference.'''
+    child = CyclicReference.model_validate({'target': {'@ref': 'self'}})
+    child.target = Reference(child)
+    model = SequenceContainer(entries=[child])
+
+    model.resolve_references()
+    model.resolve_references()
+
+    assert child.target is child
 
 
 def test_ref_creation():

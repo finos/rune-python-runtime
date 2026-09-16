@@ -16,6 +16,8 @@ because its required fields are absent.
 
 The fix is to have _deserialize_refs check for reference dicts BEFORE calling
 handler, consistent with ComplexTypeMetaDataMixin.deserialize.
+Target keys must also be retained when the deferred schema bypasses the field
+metadata validator, so references in sibling lists can find their targets.
 
 Note on placement: this test lives in rune-runtime even though the Phase 1/2/3
 pattern originates in the rune-python-generator's bundle generator.  The runtime
@@ -29,7 +31,7 @@ import pytest
 from pydantic import Field
 
 from rune.runtime.base_data_class import BaseDataClass
-from rune.runtime.metadata import BaseReference, UnresolvedReference
+from rune.runtime.metadata import BaseReference, KeyType, UnresolvedReference
 
 
 class Issuer(BaseDataClass):
@@ -45,7 +47,7 @@ class Contract(BaseDataClass):
     name: str = Field(..., description='Contract name')
 
     _KEY_REF_CONSTRAINTS = {
-        'issuerReference': {'@key', '@key:external', '@ref', '@ref:external'}
+        'issuerReference': {'@key', '@key:external', '@ref', '@ref:external', '@ref:scoped'}
     }
 
 
@@ -55,12 +57,37 @@ def _apply_deferred_annotations():
     Contract.__annotations__['issuerReference'] = Annotated[
         Optional[Issuer | BaseReference],
         Issuer.serializer(),
-        Issuer.validator(('@key', '@key:external', '@ref', '@ref:external')),
+        Issuer.validator(('@key', '@key:external', '@ref', '@ref:external', '@ref:scoped')),
     ]
     Contract.model_rebuild(force=True)
 
 
 _apply_deferred_annotations()
+
+
+class Portfolio(BaseDataClass):
+    '''Bare field types reproduce schemas rebuilt from deferred annotations.'''
+    contracts: list[Contract]
+    issuers: list[Issuer]
+
+
+@pytest.mark.parametrize('key_type', list(KeyType))
+def test_deferred_list_targets_retain_keys_and_resolve(key_type):
+    '''Target keys must survive even when field metadata validators are absent.'''
+    data = {
+        'contracts': [{
+            'name': 'test-contract',
+            'issuerReference': {key_type.rune_ref_tag: 'party1'},
+        }],
+        'issuers': [{key_type.rune_key_tag: 'party1', 'partyId': ['LEI-001']}],
+    }
+
+    portfolio = Portfolio.rune_deserialize(data)
+
+    assert portfolio.issuers[0].get_meta(key_type.key_tag) == 'party1'
+    assert portfolio.contracts[0].issuerReference is portfolio.issuers[0]
+    assert portfolio.get_object_by_key('party1', key_type) is portfolio.issuers[0]
+    assert portfolio.validate_model() == []
 
 
 def test_ref_external_deserializes_to_unresolved_reference():
