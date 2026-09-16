@@ -235,7 +235,7 @@ def test_annotated_date_fail():
 
 def test_date_with_meta_fail():
     '''test instantiation failure with an incorrect type'''
-    with pytest.raises(ValueError):
+    with pytest.raises(TypeError):
         DateWithMeta(10)
 
 

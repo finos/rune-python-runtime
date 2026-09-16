@@ -1,15 +1,16 @@
 '''Classes representing annotated basic Rune types'''
-import uuid
 import datetime
 import importlib
-from enum import Enum
-from functools import partial, lru_cache
+import uuid
+from collections.abc import Iterable
 from decimal import Decimal
-from typing import Any, Never, get_args, Iterable
-from typing_extensions import Self, Tuple
-from pydantic import (PlainSerializer, PlainValidator, WrapValidator,
-                      WrapSerializer)
+from enum import Enum
+from functools import lru_cache, partial
+from typing import Any, Never, Self, get_args
+
+from pydantic import PlainSerializer, PlainValidator, WrapSerializer, WrapValidator
 from pydantic_core import PydanticCustomError
+
 # from rune.runtime.object_registry import get_object
 
 DEFAULT_META = '_ALLOWED_METADATA'
@@ -135,7 +136,7 @@ class Reference(BaseReference):
 class UnresolvedReference(BaseReference):
     '''used by the deserialization to hold temporarily unresolved references'''
     def __init__(self, key):
-        rune_type, self.key = list(key.items())[0]
+        rune_type, self.key = next(iter(key.items()))
         self.key_type = KeyType.from_rune(rune_type)
 
     def get_reference(self, parent):
@@ -219,7 +220,7 @@ class BaseMetaDataMixin:
             self.set_meta(key=key)
             try:
                 self._get_object_map(KeyType.INTERNAL)[key] = self
-            except:  # noqa
+            except:
                 self.set_meta(key=None)
                 raise
         return key
@@ -238,7 +239,7 @@ class BaseMetaDataMixin:
         self.set_meta(check_allowed=True, **{key_type.key_tag: key})
         try:
             self._get_object_map(key_type)[key] = self
-        except:  # noqa
+        except:
             self.set_meta(check_allowed=True, **{key_type.key_tag: None})
             raise
         return self
@@ -298,13 +299,14 @@ class BaseMetaDataMixin:
                              f'not allowed for {property_nm}. Allowed types '
                              f'are: {allowed_ref_types.get(property_nm, {})}')
 
-        field_type = self.__class__.__annotations__.get(property_nm)
+        # Pydantic includes inherited fields and resolves their annotations.
+        field_type = type(self).model_fields[property_nm].annotation  # type: ignore
         allowed_type = _get_basic_type(field_type)
         if not (isinstance(allowed_type, str)
                 or isinstance(ref.target, allowed_type)):
-            raise ValueError("Can't set reference. Incompatible types: "
-                             f"expected {allowed_type}, "
-                             f"got {ref.target.__class__}")
+            raise TypeError("Can't set reference. Incompatible types: "
+                            f"expected {allowed_type}, "
+                            f"got {ref.target.__class__}")
 
         refs = self.__dict__.setdefault(REFS_CONTAINER, {})
         if property_nm not in refs:
@@ -416,9 +418,8 @@ class ComplexTypeMetaDataMixin(BaseMetaDataMixin):
             prefix = namespace_prefix
             if prefix is None:
                 prefix = cls._get_rune_namespace_prefix()
-            if prefix:
-                if not rune_type.startswith(prefix + '.'):
-                    import_path = prefix + '.' + rune_type
+            if prefix and not rune_type.startswith(prefix + '.'):
+                import_path = prefix + '.' + rune_type
             rune_module = importlib.import_module(import_path)
             return getattr(rune_module, rune_class_name)
         return cls  # support for legacy json
@@ -453,14 +454,14 @@ class ComplexTypeMetaDataMixin(BaseMetaDataMixin):
                                       'Expected either {my_type} or dict but '
                                       'got {type}.',
                                       {'type': type(obj), 'my_type': cls})
-        metadata = {k: obj[k] for k in obj.keys() if k.startswith('@')}
+        metadata = {k: obj[k] for k in obj if k.startswith('@')}
 
         # References deserialization treatment
         if aux := cls._create_unresolved_ref(metadata):
             return aux
 
         # Model creation
-        for k in metadata.keys():
+        for k in metadata:
             obj.pop(k)
 
         rune_cls = cls._type_to_cls(metadata)
@@ -483,7 +484,7 @@ class ComplexTypeMetaDataMixin(BaseMetaDataMixin):
 
     @classmethod
     @lru_cache
-    def validator(cls, allowed_meta: tuple[str] | tuple[Never, ...] = tuple()):
+    def validator(cls, allowed_meta: tuple[str] | tuple[Never, ...] = ()):
         '''default validator for the specific class'''
         allowed = set(allowed_meta)
         return PlainValidator(partial(cls.deserialize, allowed_meta=allowed),
@@ -492,16 +493,16 @@ class ComplexTypeMetaDataMixin(BaseMetaDataMixin):
 
 class BasicTypeMetaDataMixin(BaseMetaDataMixin):
     '''holds the metadata associated with an instance'''
-    _INPUT_TYPES: Any | Tuple[Any, ...] = str  # to be overridden by subclasses
+    _INPUT_TYPES: Any | tuple[Any, ...] = str  # to be overridden by subclasses
     _OUTPUT_TYPE: Any = str  # to be overridden by subclasses
     _JSON_OUTPUT = str | dict
 
     @classmethod
     def _check_type(cls, value):
         if not isinstance(value, cls._INPUT_TYPES):
-            raise ValueError(f'{cls.__name__} can be instantiated only with '
-                             f'one of the following type(s): {cls._INPUT_TYPES},'
-                             f' however the value is of type {type(value)}')
+            raise TypeError(f'{cls.__name__} can be instantiated only with '
+                            f'one of the following type(s): {cls._INPUT_TYPES},'
+                            f' however the value is of type {type(value)}')
 
     @classmethod
     def serialise(cls, obj, base_type) -> dict:
@@ -514,7 +515,7 @@ class BasicTypeMetaDataMixin(BaseMetaDataMixin):
     def deserialize(cls, obj, handler, base_types, allowed_meta: set[str]):
         '''method used as pydantic `validator`'''
         if isinstance(obj, list):
-            identity = lambda x: x  # noqa: E731
+            identity = lambda x: x
             processed = [cls.deserialize(item, identity, base_types, allowed_meta) for item in obj]
             return handler(processed)
         model = obj
@@ -649,7 +650,7 @@ class _EnumWrapper(BaseMetaDataMixin):
     '''wrapper for enums with metadata'''
     def __init__(self, enum_instance=_EnumWrapperDefaultVal.NOT_SET):
         if not isinstance(enum_instance, Enum):
-            raise ValueError("enum_instance must be an instance of an Enum")
+            raise TypeError("enum_instance must be an instance of an Enum")
         self._enum_instance = enum_instance
 
     @property
@@ -723,7 +724,7 @@ class EnumWithMetaMixin:
 
     @classmethod
     @lru_cache
-    def validator(cls, allowed_meta: tuple[str] | tuple[Never, ...] = tuple()):
+    def validator(cls, allowed_meta: tuple[str] | tuple[Never, ...] = ()):
         '''default validator for the specific class'''
         allowed = set(allowed_meta)
         return PlainValidator(partial(cls.deserialize, allowed_meta=allowed),

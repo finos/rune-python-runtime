@@ -1,4 +1,5 @@
 '''test key generation/retrieval runtime functions'''
+import json
 from decimal import Decimal
 from typing_extensions import Annotated
 import pytest
@@ -61,6 +62,23 @@ class DummyLoan2(BaseDataClass):
         'loan': {'@ref', '@ref:external'},
         'repayment': {'@ref', '@ref:external'}
     }
+
+
+class NamedLoan(DummyLoan2):
+    '''Inherit both reference fields without redeclaring their annotations.'''
+    label: str = 'loan'
+
+
+class ExtendedNamedLoan(NamedLoan):
+    '''Reference fields can be inherited through multiple levels.'''
+    pass
+
+
+class LoanBook(BaseDataClass):
+    '''Key targets and inherited references in separate list fields.'''
+    cashflows: list[CashFlow]
+    loans: list[NamedLoan]
+
 
 class DummyLoan3(BaseDataClass):
     '''number test class'''
@@ -218,6 +236,38 @@ def test_ref_assign():
                        repayment=CashFlow(currency='EUR', amount=101))
     model.repayment = Reference(model.loan)
     assert id(model.loan) == id(model.repayment)
+
+
+@pytest.mark.parametrize('model_type', [NamedLoan, ExtendedNamedLoan])
+def test_ref_assign_to_inherited_field(model_type):
+    '''Inherited reference fields retain their declared target type.'''
+    model = model_type(loan=CashFlow(currency='EUR', amount=100),
+                       repayment=CashFlow(currency='EUR', amount=101))
+
+    model.repayment = Reference(model.loan)
+
+    assert model.repayment is model.loan
+    assert model.resolve_ref_key('repayment') == model.loan.get_meta('@key')
+
+
+@pytest.mark.parametrize('validate_model', [False, True])
+def test_deserialize_inherited_references_in_lists(validate_model):
+    '''Inherited references resolve before optional model validation.'''
+    data = json.dumps({
+        'cashflows': [{
+            '@key:external': 'cashflow1', 'currency': 'EUR', 'amount': '100',
+        }],
+        'loans': [{
+            'loan': {'@ref:external': 'cashflow1'},
+            'repayment': {'@ref:external': 'cashflow1'},
+        }],
+    })
+
+    book = LoanBook.rune_deserialize(data, validate_model=validate_model)
+
+    assert book.loans[0].loan is book.cashflows[0]
+    assert book.loans[0].repayment is book.cashflows[0]
+    assert book.loans[0].resolve_ref_key('repayment') == 'cashflow1'
 
 
 def test_ref_assign_from_cow_wrapped_object():
@@ -445,13 +495,17 @@ def test_reference_non_metadata_target_with_ext_key_raises():
         Reference('not_an_object', 'ext_key')
 
 
-def test_bind_property_rejects_wrong_type():
+@pytest.mark.parametrize('model_type', [DummyLoan2, NamedLoan, ExtendedNamedLoan])
+def test_bind_property_rejects_wrong_type(model_type):
     '''reject refs that don't match field type'''
-    model = DummyLoan2(loan=CashFlow(currency='EUR', amount=100),
+    model = model_type(loan=CashFlow(currency='EUR', amount=100),
                        repayment=CashFlow(currency='EUR', amount=101))
+    original_repayment = model.repayment
     other = OtherThing(name='other')
-    with pytest.raises(ValueError):
+    with pytest.raises(TypeError, match='Incompatible types'):
         model.repayment = Reference(other)
+    assert model.repayment is original_repayment
+    assert model.resolve_ref_key('repayment') is None
 
 
 def test_bind_property_rejects_non_replaceable():
