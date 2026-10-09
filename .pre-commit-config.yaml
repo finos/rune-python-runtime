@@ -1,0 +1,25 @@
+##
+## Copyright (c) 2023-2026 CLOUDRISK Limited and FT Advisory LLC
+## SPDX-License-Identifier: Apache-2.0
+##
+repos:
+  - repo: local
+    hooks:
+      - id: license-headers-dirs
+        name: Add/check license headers (src, test, .github)
+        entry: licenseheaders
+        args: [-t, src/license/header.txt, --dir, src, --dir, test, --dir, .github]
+        language: python
+        additional_dependencies: [licenseheaders>=0.8.8]
+        types_or: [python, yaml, shell, toml]
+        pass_filenames: false
+      - id: license-headers-files
+        name: Add/check license headers (root files)
+        entry: licenseheaders
+        args: [-t, src/license/header.txt, --additional-extensions, python=.toml,
+               -f, build_wheel.sh, dev_clean_setup.sh, netlify.toml, pyproject.toml,
+               safety-policy.yml, .pre-commit-config.yaml]
+        language: python
+        additional_dependencies: [licenseheaders>=0.8.8]
+        types_or: [python, yaml, shell, toml]
+        pass_filenames: false

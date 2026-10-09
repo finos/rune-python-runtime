@@ -1,0 +1,39 @@
+##
+## Copyright (c) 2023-2026 CLOUDRISK Limited and FT Advisory LLC
+## SPDX-License-Identifier: Apache-2.0
+##
+name: Check License Headers
+
+on:
+  push:
+    branches:
+      - main
+      - develop
+  pull_request:
+    branches:
+      - main
+      - develop
+
+jobs:
+  license-headers:
+    name: Verify license headers
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install licenseheaders
+        run: pip install licenseheaders
+
+      - name: Check license headers
+        run: |
+          src/license/apply_headers.sh
+          git diff --exit-code || \
+            (echo "One or more files are missing a license header. Run 'src/license/apply_headers.sh' locally to fix." && \
+             exit 1)
