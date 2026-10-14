@@ -107,7 +107,7 @@ class BaseDataClass(BaseModel, ComplexTypeMetaDataMixin):
     @model_serializer(mode='wrap')
     def _serialize_refs(self, serializer, info):
         '''should replace objects with refs while serializing'''
-        res = serializer(self, info)
+        res = serializer(self)
         refs = self._get_rune_refs_container()
         for property_nm, (key, ref_type) in refs.items():
             res[property_nm] = {ref_type.rune_ref_tag: key}
