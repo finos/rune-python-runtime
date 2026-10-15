@@ -689,7 +689,7 @@ class EnumWithMetaMixin:
     def serialise(cls, obj, handler, info) -> dict:
         '''used as serialisation method with pydantic'''
         res = obj.serialise_meta()
-        res['@data'] = handler(obj.enum_instance, info)
+        res['@data'] = handler(obj.enum_instance)
         return res
 
     @classmethod

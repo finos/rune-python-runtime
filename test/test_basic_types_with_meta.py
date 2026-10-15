@@ -356,6 +356,14 @@ def test_fail_create_constrained_num_model():
         ConstrainedNumberModel(amount=NumberWithMeta(-1))
 
 
+def test_dump_annotated_enum_scheme():
+    '''test the serialisation of an enum with meta'''
+    scheme_json = '{"enum_t":{"@scheme":"http://fpml.org","@data":"B"}}'
+    model = AnnotatedEnumModel.model_validate_json(scheme_json)
+    json_str = model.model_dump_json(exclude_unset=True)
+    assert json_str == scheme_json
+
+
 def test_annotated_enum_assignment():
     '''test assignment'''
     model = AnnotatedEnumModel(enum_t=EnumType.B)
