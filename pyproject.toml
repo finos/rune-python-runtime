@@ -1,3 +1,7 @@
+#
+# Copyright (c) 2023-2026 CLOUDRISK Limited and FT Advisory LLC
+# SPDX-License-Identifier: Apache-2.0
+#
 [build-system]
 requires = ["setuptools>=64", "setuptools_scm>=8", "wheel>=0.45.1", "pytest-runner>=6.0.1"]
 build-backend = "setuptools.build_meta"
@@ -15,7 +19,9 @@ optional-dependencies.dev = [
     "pytest>=9.0.2",
     "pytest-cov>=7.0.0",
     "pytest-mock>=3.14.1",
-    "types-python-dateutil>=2.9.0.20250809"
+    "types-python-dateutil>=2.9.0.20250809",
+    "licenseheaders>=0.8.8",
+    "pre-commit>=3.0.0"
 ]
 description = "rune-runtime: the Rune DSL runtime for Python"
 readme = "README.md"

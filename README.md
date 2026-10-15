@@ -25,6 +25,20 @@ Use [dev_clean_setup.sh](https://github.com/Cloudrisk/rune-python-runtime/blob/m
 ```sh
 ./dev_clean_setup.sh
 ```
+
+This script installs all dev dependencies and registers the pre-commit hooks, including the license-header check. Every `.py` file under `src/` and `test/` must carry the Apache 2.0 SPDX header:
+
+```python
+# Copyright (c) 2023-2026 CLOUDRISK Limited and FT Advisory LLC
+# SPDX-License-Identifier: Apache-2.0
+```
+
+To add missing headers to all files at any time, run:
+
+```sh
+src/license/apply_headers.sh
+```
+
 ### 3. Build
 Use [build_wheel.sh](https://github.com/Cloudrisk/rune-python-runtime/blob/main/build_wheel.sh) to build the package
 ```sh

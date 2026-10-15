@@ -1,3 +1,7 @@
+<!--
+Copyright (c) 2023-2026 CLOUDRISK Limited and FT Advisory LLC
+SPDX-License-Identifier: Apache-2.0
+-->
 ---
 name: "\U0001F91D {project name} Meeting Minutes"
 about: To track {project name} meeting agenda and attendance
