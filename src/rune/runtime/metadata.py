@@ -1,3 +1,6 @@
+# Copyright (c) 2023-2026 CLOUDRISK Limited and FT Advisory LLC
+# SPDX-License-Identifier: Apache-2.0
+
 '''Classes representing annotated basic Rune types'''
 import datetime
 import importlib
@@ -514,6 +517,8 @@ class BasicTypeMetaDataMixin(BaseMetaDataMixin):
     @classmethod
     def deserialize(cls, obj, handler, base_types, allowed_meta: set[str]):
         '''method used as pydantic `validator`'''
+        if obj is None:
+            return handler(None)
         if isinstance(obj, list):
             identity = lambda x: x
             processed = [cls.deserialize(item, identity, base_types, allowed_meta) for item in obj]
