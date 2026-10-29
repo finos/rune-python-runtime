@@ -11,7 +11,8 @@ from enum import Enum
 from functools import lru_cache, partial
 from typing import Any, Never, Self, get_args
 
-from pydantic import PlainSerializer, PlainValidator, WrapSerializer, WrapValidator
+from pydantic import (PlainSerializer, PlainValidator,
+                      ValidatorFunctionWrapHandler, WrapSerializer, WrapValidator)
 from pydantic_core import PydanticCustomError
 
 # from rune.runtime.object_registry import get_object
@@ -487,11 +488,16 @@ class ComplexTypeMetaDataMixin(BaseMetaDataMixin):
 
     @classmethod
     @lru_cache
-    def validator(cls, allowed_meta: tuple[str] | tuple[Never, ...] = ()):
-        '''default validator for the specific class'''
+    def validator(cls, allowed_meta: tuple[str, ...] = ()) -> WrapValidator:
+        '''Let the field schema validate None and deserialize Rune values.'''
         allowed = set(allowed_meta)
-        return PlainValidator(partial(cls.deserialize, allowed_meta=allowed),
-                              json_schema_input_type=dict)
+
+        def validate(obj: Any, handler: ValidatorFunctionWrapHandler) -> Any:
+            if obj is None:
+                return handler(None)
+            return cls.deserialize(obj, allowed)
+
+        return WrapValidator(validate, json_schema_input_type=dict)
 
 
 class BasicTypeMetaDataMixin(BaseMetaDataMixin):
