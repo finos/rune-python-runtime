@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 '''Classes representing annotated basic Rune types'''
+import copy
 import datetime
 import importlib
 import uuid
@@ -562,7 +563,24 @@ class BasicTypeMetaDataMixin(BaseMetaDataMixin):
                              json_schema_input_type=cls._JSON_OUTPUT)
 
 
-class DateWithMeta(datetime.date, BasicTypeMetaDataMixin):
+class _DateTimeCopyMixin:
+    '''Copy temporal values without using their bytes-based pickle protocol.'''
+
+    def __copy__(self) -> Self:
+        '''Copy the value and share its attribute values.'''
+        clone = type(self)(self)  # type: ignore
+        clone.__dict__.update(self.__dict__)
+        return clone
+
+    def __deepcopy__(self, memo: dict[int, Any]) -> Self:
+        '''Deep-copy attributes while preserving cycles and shared values.'''
+        clone = type(self)(self)  # type: ignore
+        memo[id(self)] = clone
+        clone.__dict__.update(copy.deepcopy(self.__dict__, memo))
+        return clone
+
+
+class DateWithMeta(datetime.date, _DateTimeCopyMixin, BasicTypeMetaDataMixin):
     '''date with metadata'''
     _INPUT_TYPES = (datetime.date, str)
 
@@ -576,7 +594,7 @@ class DateWithMeta(datetime.date, BasicTypeMetaDataMixin):
         return obj
 
 
-class TimeWithMeta(datetime.time, BasicTypeMetaDataMixin):
+class TimeWithMeta(datetime.time, _DateTimeCopyMixin, BasicTypeMetaDataMixin):
     '''annotated time'''
     _INPUT_TYPES = (datetime.time, str)
 
@@ -595,7 +613,7 @@ class TimeWithMeta(datetime.time, BasicTypeMetaDataMixin):
         return obj
 
 
-class DateTimeWithMeta(datetime.datetime, BasicTypeMetaDataMixin):
+class DateTimeWithMeta(datetime.datetime, _DateTimeCopyMixin, BasicTypeMetaDataMixin):
     '''annotated datetime'''
     _INPUT_TYPES = (datetime.datetime, str)
 
