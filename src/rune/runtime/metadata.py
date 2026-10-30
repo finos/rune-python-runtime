@@ -6,6 +6,7 @@ import copy
 import datetime
 import importlib
 import uuid
+import weakref
 from collections.abc import Iterable, MutableSequence
 from decimal import Decimal
 from enum import Enum
@@ -167,6 +168,277 @@ class UnresolvedReference(BaseReference):
     def get_reference(self, parent):
         '''convert to a resolved reference'''
         return Reference(self.key, key_type=self.key_type, parent=parent)
+
+
+_MISSING = object()
+
+
+class _ReferenceList(list):
+    '''List subclass that keeps per-element Rune reference bindings in sync.'''
+
+    def __init__(
+        self,
+        iterable: Iterable[Any] = (),
+        *,
+        ref_entries: (
+            Iterable[tuple[str, KeyType] | None]
+            | dict[int, tuple[str, KeyType]]
+            | None
+        ) = None,
+        owner: Any | None = None,
+        prop_name: str | None = None,
+    ):
+        items = list(iterable)
+        super().__init__(items)
+        if isinstance(ref_entries, dict):
+            self._ref_entries: list[tuple[str, KeyType] | None] = [
+                ref_entries.get(idx) for idx in range(len(items))
+            ]
+        elif ref_entries is not None:
+            entries = list(ref_entries)
+            if len(entries) < len(items):
+                entries.extend([None] * (len(items) - len(entries)))
+            self._ref_entries = entries[:len(items)]
+        elif isinstance(iterable, _ReferenceList):
+            self._ref_entries = list(iterable._ref_entries[:len(items)])
+        else:
+            self._ref_entries = [None] * len(items)
+        self._owner_ref = weakref.ref(owner) if owner is not None else None
+        self._prop_name = prop_name
+
+    def _owner(self) -> Any | None:
+        return self._owner_ref() if self._owner_ref is not None else None
+
+    def _bind_owner(self, owner: Any, prop_name: str) -> None:
+        self._owner_ref = weakref.ref(owner)
+        self._prop_name = prop_name
+        self._sync_owner_refs()
+
+    def _sync_owner_refs(self) -> None:
+        owner = self._owner()
+        if owner is None or not self._prop_name:
+            return
+        refs = owner.__dict__.setdefault(REFS_CONTAINER, {})
+        mapping = {
+            idx: entry
+            for idx, entry in enumerate(self._ref_entries)
+            if entry is not None
+        }
+        if mapping:
+            refs[self._prop_name] = mapping
+        else:
+            refs.pop(self._prop_name, None)
+
+    def _prepare_element(
+        self,
+        item: Any,
+        existing_entry: tuple[str, KeyType] | None = None,
+        current_item: Any = _MISSING,
+        is_already_ref: bool = False,
+        index: int | None = None,
+    ) -> tuple[Any, tuple[str, KeyType] | None]:
+        item = _unwrap_cow_proxy(item)
+        owner = self._owner()
+        prop_name = self._prop_name
+        if isinstance(item, Reference):
+            if owner is not None and prop_name:
+                # pylint: disable=protected-access
+                owner._validate_ref_for_property(
+                    prop_name,
+                    item,
+                    current_item=current_item,
+                    is_already_ref=is_already_ref,
+                    index=index,
+                )
+            return item.target, (item.target_key, item.key_type)
+        if existing_entry is not None:
+            key, key_type = existing_entry
+            if owner is not None:
+                try:
+                    registered = owner.get_object_by_key(key, key_type)
+                except KeyError:
+                    registered = None
+                if registered is not None:
+                    if item is registered or (
+                        isinstance(item, BaseMetaDataMixin)
+                        and item.get_meta(key_type.key_tag) == key
+                    ):
+                        return registered, existing_entry
+                    return item, None
+            if (
+                isinstance(item, BaseMetaDataMixin)
+                and item.get_meta(key_type.key_tag) == key
+            ):
+                return item, existing_entry
+        return item, None
+
+    def _attach_inline_parent(
+        self,
+        item: Any,
+        entry: tuple[str, KeyType] | None,
+    ) -> None:
+        owner = self._owner()
+        if (
+            owner is not None
+            and entry is None
+            and isinstance(item, BaseMetaDataMixin)
+        ):
+            # pylint: disable=protected-access
+            item._set_rune_parent(owner)
+
+    def __getitem__(self, index):
+        result = super().__getitem__(index)
+        if isinstance(index, slice):
+            return _ReferenceList(
+                result,
+                ref_entries=self._ref_entries[index],
+            )
+        return result
+
+    def __setitem__(self, index, value) -> None:
+        if isinstance(index, slice):
+            if isinstance(value, _ReferenceList):
+                raw_items = list(value)
+                raw_entries = list(value._ref_entries)
+            else:
+                raw_items = list(value)
+                raw_entries = [None] * len(raw_items)
+            prepared = [
+                self._prepare_element(v, existing_entry=e)
+                for v, e in zip(raw_items, raw_entries)
+            ]
+            new_items = [p[0] for p in prepared]
+            new_entries = [p[1] for p in prepared]
+            super().__setitem__(index, new_items)
+            self._ref_entries[index] = new_entries
+            for item, entry in prepared:
+                self._attach_inline_parent(item, entry)
+            self._sync_owner_refs()
+            return
+
+        old_item = super().__getitem__(index)
+        old_entry = self._ref_entries[index]
+        val, entry = self._prepare_element(
+            value,
+            current_item=old_item,
+            is_already_ref=old_entry is not None,
+            index=index,
+        )
+        super().__setitem__(index, val)
+        self._ref_entries[index] = entry
+        self._attach_inline_parent(val, entry)
+        self._sync_owner_refs()
+
+    def __delitem__(self, index) -> None:
+        super().__delitem__(index)
+        del self._ref_entries[index]
+        self._sync_owner_refs()
+
+    def pop(self, index: int = -1) -> Any:
+        val = super().pop(index)
+        self._ref_entries.pop(index)
+        self._sync_owner_refs()
+        return val
+
+    def append(self, value: Any) -> None:
+        val, entry = self._prepare_element(value)
+        super().append(val)
+        self._ref_entries.append(entry)
+        self._attach_inline_parent(val, entry)
+        self._sync_owner_refs()
+
+    def insert(self, index: int, value: Any) -> None:
+        val, entry = self._prepare_element(value)
+        super().insert(index, val)
+        self._ref_entries.insert(index, entry)
+        self._attach_inline_parent(val, entry)
+        self._sync_owner_refs()
+
+    def extend(self, iterable: Iterable[Any]) -> None:
+        if isinstance(iterable, _ReferenceList):
+            raw_items = list(iterable)
+            raw_entries = list(iterable._ref_entries)
+        else:
+            raw_items = list(iterable)
+            raw_entries = [None] * len(raw_items)
+        prepared = [
+            self._prepare_element(v, existing_entry=e)
+            for v, e in zip(raw_items, raw_entries)
+        ]
+        super().extend(p[0] for p in prepared)
+        self._ref_entries.extend(p[1] for p in prepared)
+        for item, entry in prepared:
+            self._attach_inline_parent(item, entry)
+        self._sync_owner_refs()
+
+    def __iadd__(self, iterable: Iterable[Any]) -> Self:
+        self.extend(iterable)
+        return self
+
+    def __add__(self, other: Any) -> _ReferenceList:
+        if not isinstance(other, list):
+            return super().__add__(other)  # type: ignore[return-value]
+        other_entries = (
+            list(other._ref_entries)
+            if isinstance(other, _ReferenceList)
+            else [None] * len(other)
+        )
+        return _ReferenceList(
+            super().__add__(other),
+            ref_entries=self._ref_entries + other_entries,
+        )
+
+    def __radd__(self, other: Any) -> _ReferenceList:
+        if not isinstance(other, list):
+            return NotImplemented
+        other_entries = (
+            list(other._ref_entries)
+            if isinstance(other, _ReferenceList)
+            else [None] * len(other)
+        )
+        return _ReferenceList(
+            list(other) + list(self),
+            ref_entries=other_entries + self._ref_entries,
+        )
+
+    def reverse(self) -> None:
+        super().reverse()
+        self._ref_entries.reverse()
+        self._sync_owner_refs()
+
+    def clear(self) -> None:
+        super().clear()
+        self._ref_entries.clear()
+        self._sync_owner_refs()
+
+    def remove(self, value: Any) -> None:
+        idx = self.index(value)
+        del self[idx]
+
+    def sort(self, *, key: Any = None, reverse: bool = False) -> None:
+        pairs = list(zip(self, self._ref_entries))
+        if key is None:
+            pairs.sort(key=lambda pair: pair[0], reverse=reverse)
+        else:
+            pairs.sort(key=lambda pair: key(pair[0]), reverse=reverse)
+        super().__setitem__(slice(None), [p[0] for p in pairs])
+        self._ref_entries[:] = [p[1] for p in pairs]
+        self._sync_owner_refs()
+
+    def copy(self) -> _ReferenceList:
+        return _ReferenceList(self, ref_entries=self._ref_entries)
+
+    def __copy__(self) -> _ReferenceList:
+        return self.copy()
+
+    def __deepcopy__(self, memo: dict[int, Any]) -> _ReferenceList:
+        clone = _ReferenceList()
+        memo[id(self)] = clone
+        super(_ReferenceList, clone).extend(
+            copy.deepcopy(item, memo) for item in self
+        )
+        clone._ref_entries = list(self._ref_entries)
+        return clone
 
 
 class BaseMetaDataMixin:
@@ -357,12 +629,16 @@ class BaseMetaDataMixin:
                              f'currently existing meta slots: {current_meta}')
         meta |= {k: None for k in allowed_meta - current_meta}
 
-    def _bind_property_to(self,
-                          property_nm: str,
-                          ref: Reference,
-                          index: int | None = None):
-        '''set the property to reference the object referenced by the key'''
-        old_val = getattr(self, property_nm)
+    def _validate_ref_for_property(
+        self,
+        property_nm: str,
+        ref: Reference,
+        *,
+        current_item: Any = _MISSING,
+        is_already_ref: bool = False,
+        index: int | None = None,
+    ) -> None:
+        '''Validate that ref is permitted and type-compatible for property_nm.'''
         allowed_refs = self._get_allowed_ref_types(property_nm)
         if ref.key_type.rune_ref_tag not in allowed_refs:
             raise ValueError(f'Ref of type {ref.key_type} '
@@ -380,40 +656,63 @@ class BaseMetaDataMixin:
                             f"expected {allowed_type}, "
                             f"got {ref.target.__class__}")
 
+        if current_item is not _MISSING and not is_already_ref:
+            if not _replaceable(current_item):
+                if index is not None:
+                    raise ValueError(f'Property {property_nm}[{index}] of type '
+                                     f"{type(current_item)} can't be a reference")
+                raise ValueError(f'Property {property_nm} of type '
+                                 f"{type(current_item)} can't be a reference")
+            # pylint: disable=protected-access
+            if isinstance(current_item, BaseMetaDataMixin):
+                current_item._check_props_allowed({ref.key_type.rune_ref_tag: ''})
+
+    def _bind_property_to(self,
+                          property_nm: str,
+                          ref: Reference,
+                          index: int | None = None):
+        '''set the property to reference the object referenced by the key'''
+        old_val = getattr(self, property_nm)
         refs = self.__dict__.setdefault(REFS_CONTAINER, {})
         if index is not None:
             if isinstance(old_val, tuple):
                 old_val = list(old_val)
-                self.__dict__[property_nm] = old_val
             if not isinstance(old_val, MutableSequence):
                 raise ValueError(f'Property {property_nm} of type '
                                  f"{type(old_val)} is not a sequence")
             old_item = old_val[index]
             prop_refs = refs.get(property_nm)
-            if not isinstance(prop_refs, dict) or index not in prop_refs:
-                if not _replaceable(old_item):
-                    raise ValueError(f'Property {property_nm}[{index}] of type '
-                                     f"{type(old_item)} can't be a reference")
-                # pylint: disable=protected-access
-                if isinstance(old_item, BaseMetaDataMixin):
-                    old_item._check_props_allowed({ref.key_type.rune_ref_tag: ''})
-            if not isinstance(prop_refs, dict):
-                prop_refs = {}
-                refs[property_nm] = prop_refs
-            old_val[index] = ref.target
-            prop_refs[index] = (ref.target_key, ref.key_type)
+            is_already_ref = isinstance(prop_refs, dict) and index in prop_refs
+            self._validate_ref_for_property(
+                property_nm,
+                ref,
+                current_item=old_item,
+                is_already_ref=is_already_ref,
+                index=index,
+            )
+            if not isinstance(old_val, _ReferenceList):
+                old_val = _ReferenceList(
+                    old_val,
+                    ref_entries=prop_refs if isinstance(prop_refs, dict) else None,
+                    owner=self,
+                    prop_name=property_nm,
+                )
+                self.__dict__[property_nm] = old_val
+            elif old_val._owner() is not self or old_val._prop_name != property_nm:
+                old_val._bind_owner(self, property_nm)
+            super(_ReferenceList, old_val).__setitem__(index, ref.target)
+            old_val._ref_entries[index] = (ref.target_key, ref.key_type)
+            old_val._sync_owner_refs()
             if hasattr(self, '__pydantic_fields_set__'):
                 self.__pydantic_fields_set__.add(property_nm)  # type: ignore
             return
 
-        if property_nm not in refs:
-            # not a reference - check if allowed to replace with one
-            if not _replaceable(old_val):
-                raise ValueError(f'Property {property_nm} of type '
-                                 f"{type(old_val)} can't be a reference")
-            # pylint: disable=protected-access
-            if isinstance(old_val, BaseMetaDataMixin):
-                old_val._check_props_allowed({ref.key_type.rune_ref_tag: ''})
+        self._validate_ref_for_property(
+            property_nm,
+            ref,
+            current_item=old_val,
+            is_already_ref=property_nm in refs,
+        )
 
         # setattr(self, property_nm, ref.target)  # nope - need to avoid here!
         self.__dict__[property_nm] = ref.target  # NOTE: avoid here setattr
@@ -431,6 +730,9 @@ class BaseMetaDataMixin:
 
     def _get_object_map(self, key_type: KeyType) -> dict[str, Any]:
         if not self.get_rune_parent():
+            object_maps = self.__dict__.setdefault(RUNE_OBJ_MAPS, {})
+            return object_maps.setdefault(key_type, {})
+        if key_type == KeyType.SCOPED and self.is_scope_instance():
             object_maps = self.__dict__.setdefault(RUNE_OBJ_MAPS, {})
             return object_maps.setdefault(key_type, {})
         if local_map := self.__dict__.get(RUNE_OBJ_MAPS, {}).get(key_type):
@@ -681,6 +983,8 @@ class BasicTypeMetaDataMixin(BaseMetaDataMixin):
         '''Copy the value and share its attribute values without parent links.'''
         clone = type(self)(self)  # type: ignore
         clone.__dict__.update(self._copy_rune_dict())
+        clone.__dict__.pop(RUNE_OBJ_MAPS, None)
+        clone._register_keys(clone._get_meta_container())
         return clone
 
     def __deepcopy__(self, memo: dict[int, Any]) -> Self:
@@ -688,6 +992,9 @@ class BasicTypeMetaDataMixin(BaseMetaDataMixin):
         clone = type(self)(self)  # type: ignore
         memo[id(self)] = clone
         clone.__dict__.update(self._deepcopy_rune_dict(memo))
+        if not clone.get_rune_parent():
+            clone.__dict__.pop(RUNE_OBJ_MAPS, None)
+            clone._register_keys(clone._get_meta_container())
         return clone
 
 
@@ -698,6 +1005,8 @@ class _DateTimeCopyMixin:
         '''Copy the value and share its attribute values.'''
         clone = type(self)(self)  # type: ignore
         clone.__dict__.update(self._copy_rune_dict())  # type: ignore
+        clone.__dict__.pop(RUNE_OBJ_MAPS, None)
+        clone._register_keys(clone._get_meta_container())  # type: ignore
         return clone
 
     def __deepcopy__(self, memo: dict[int, Any]) -> Self:
@@ -705,6 +1014,9 @@ class _DateTimeCopyMixin:
         clone = type(self)(self)  # type: ignore
         memo[id(self)] = clone
         clone.__dict__.update(self._deepcopy_rune_dict(memo))  # type: ignore
+        if not clone.get_rune_parent():  # type: ignore
+            clone.__dict__.pop(RUNE_OBJ_MAPS, None)
+            clone._register_keys(clone._get_meta_container())  # type: ignore
         return clone
 
 
@@ -845,6 +1157,8 @@ class _EnumWrapper(BaseMetaDataMixin):
         '''Copy the enum wrapper without retaining its parent link.'''
         clone = type(self)(self._enum_instance)
         clone.__dict__.update(self._copy_rune_dict())
+        clone.__dict__.pop(RUNE_OBJ_MAPS, None)
+        clone._register_keys(clone._get_meta_container())
         return clone
 
     def __deepcopy__(self, memo: dict[int, Any]) -> Self:
@@ -852,6 +1166,9 @@ class _EnumWrapper(BaseMetaDataMixin):
         clone = type(self)(self._enum_instance)
         memo[id(self)] = clone
         clone.__dict__.update(self._deepcopy_rune_dict(memo))
+        if not clone.get_rune_parent():
+            clone.__dict__.pop(RUNE_OBJ_MAPS, None)
+            clone._register_keys(clone._get_meta_container())
         return clone
 
 

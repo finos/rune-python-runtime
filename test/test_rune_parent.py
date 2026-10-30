@@ -14,6 +14,7 @@ from rune.runtime.base_data_class import BaseDataClass
 class B(BaseDataClass):
     '''no doc'''
     _FQRTN: ClassVar[str] = 'test_rune_parent.B'
+    _ALLOWED_METADATA: ClassVar[set[str]] = {'@key', '@key:external', '@key:scoped'}
     fieldB: str = Field(..., description='')
 
 
@@ -349,5 +350,48 @@ def test_cow_write_on_child_produces_detached_shadow_rebound_to_parent():
     assert result.typeA.get_rune_parent() is result
     assert result.typeA.b.get_rune_parent() is result.typeA
     assert result.typeA.b.fieldB == 'updated'
+
+
+def test_detached_subtree_copies_rebuild_key_registry():
+    '''Detached copies of nested subtrees rebuild their key registries so
+    Reference(key, parent=clone) and get_object_by_key resolve against the
+    copied subtree rather than raising KeyError.'''
+    rune_dict = {
+        "bAddress": {
+            "@ref:scoped": "aKey3"
+        },
+        "typeA": {
+            "b": {
+                "@key:scoped": "aKey3",
+                "fieldB": "some b content"
+            }
+        },
+    }
+    deep = DeepRef.model_validate({"root": rune_dict})
+    internal_key = deep.root.typeA.b.get_or_create_key()
+
+    # Deep copy of nested model `deep.root` (whose key registry lived on `deep`)
+    root_clone = deep.root.model_copy(deep=True)
+    assert root_clone.get_rune_parent() is None
+    assert root_clone.get_object_by_key("aKey3", KeyType.SCOPED) is root_clone.typeA.b
+    assert root_clone.get_object_by_key(internal_key, KeyType.INTERNAL) is root_clone.typeA.b
+    scoped_ref = Reference("aKey3", key_type=KeyType.SCOPED, parent=root_clone)
+    int_ref = Reference(internal_key, key_type=KeyType.INTERNAL, parent=root_clone)
+    assert scoped_ref.target is root_clone.typeA.b
+    assert int_ref.target is root_clone.typeA.b
+
+    # Deeper nested subtree copy `deep.root.typeA`
+    type_a_clone = _clone_for_write(deep.root.typeA)
+    assert type_a_clone.get_rune_parent() is None
+    assert type_a_clone.get_object_by_key("aKey3", KeyType.SCOPED) is type_a_clone.b
+    assert type_a_clone.get_object_by_key(internal_key, KeyType.INTERNAL) is type_a_clone.b
+    assert Reference("aKey3", key_type=KeyType.SCOPED, parent=type_a_clone).target is type_a_clone.b
+    assert Reference(internal_key, key_type=KeyType.INTERNAL, parent=type_a_clone).target is type_a_clone.b
+
+    # Shallow copy also retains key lookup for its subtree
+    shallow_root = deep.root.model_copy(deep=False)
+    assert shallow_root.get_rune_parent() is None
+    assert Reference("aKey3", key_type=KeyType.SCOPED, parent=shallow_root).target is deep.root.typeA.b
+    assert Reference(internal_key, key_type=KeyType.INTERNAL, parent=shallow_root).target is deep.root.typeA.b
 
 # EOF
