@@ -6,7 +6,7 @@ import copy
 import datetime
 import importlib
 import uuid
-from collections.abc import Iterable
+from collections.abc import Iterable, MutableSequence
 from decimal import Decimal
 from enum import Enum
 from functools import lru_cache, partial
@@ -38,8 +38,28 @@ def _py_to_ser_key(key: str) -> str:
 def _get_basic_type(annotated_type):
     embedded_type = get_args(annotated_type)
     if embedded_type:
+        for arg in embedded_type:
+            if arg is type(None) or (
+                isinstance(arg, type) and issubclass(arg, BaseReference)
+            ):
+                continue
+            return _get_basic_type(arg)
         return _get_basic_type(embedded_type[0])
     return annotated_type
+
+
+def _extract_allowed_refs(tp_or_meta: Any) -> set[str]:
+    '''Extract allowed @ref tags from field validator metadata or annotations.'''
+    allowed: set[str] = set()
+    func = getattr(tp_or_meta, 'func', tp_or_meta)
+    meta = getattr(func, '_allowed_meta', None)
+    if meta is None and isinstance(func, partial):
+        meta = func.keywords.get('allowed_meta')
+    if meta:
+        allowed.update(m for m in meta if m.startswith('@ref'))
+    for arg in get_args(tp_or_meta):
+        allowed.update(_extract_allowed_refs(arg))
+    return allowed
 
 
 def _unwrap_cow_proxy(value: Any) -> Any:
@@ -276,12 +296,36 @@ class BaseMetaDataMixin:
             copied[PARENT_PROP] = cloned_parent
         return copied
 
-    def resolve_ref_key(self, property_name: str) -> Any:
+    def resolve_ref_key(self,
+                        property_name: str,
+                        index: int | None = None) -> Any:
         ''' if the property exists and it is a reference, return the reference,
             otherwise return None
         '''
         refs = self._get_rune_refs_container()
-        return refs.get(property_name, [None])[0]
+        entry = refs.get(property_name)
+        if entry is None:
+            return None
+        if isinstance(entry, dict):
+            if index is not None:
+                item = entry.get(index)
+                return item[0] if item is not None else None
+            return [item[0] for _, item in sorted(entry.items())]
+        return entry[0]
+
+    def _get_allowed_ref_types(self, property_nm: str) -> set[str]:
+        '''Return the allowed @ref tags for property_nm.'''
+        if hasattr(self, '_KEY_REF_CONSTRAINTS'):
+            constraints = getattr(self, '_KEY_REF_CONSTRAINTS') or {}
+            return set(constraints.get(property_nm, ()))
+        model_fields = getattr(type(self), 'model_fields', {})
+        field_info = model_fields.get(property_nm)
+        if field_info is None:
+            return set()
+        allowed = _extract_allowed_refs(field_info.annotation)
+        for item in getattr(field_info, 'metadata', ()):
+            allowed.update(_extract_allowed_refs(item))
+        return allowed
 
     def _get_meta_container(self) -> dict[str, Any]:
         return self.__dict__.get(META_CONTAINER, {})
@@ -313,26 +357,55 @@ class BaseMetaDataMixin:
                              f'currently existing meta slots: {current_meta}')
         meta |= {k: None for k in allowed_meta - current_meta}
 
-    def _bind_property_to(self, property_nm: str, ref: Reference):
+    def _bind_property_to(self,
+                          property_nm: str,
+                          ref: Reference,
+                          index: int | None = None):
         '''set the property to reference the object referenced by the key'''
         old_val = getattr(self, property_nm)
-        allowed_ref_types = getattr(self, '_KEY_REF_CONSTRAINTS', {})
-        if (ref.key_type.rune_ref_tag not in allowed_ref_types.get(
-                property_nm, {})):  # and not _replaceable(old_val)):
+        allowed_refs = self._get_allowed_ref_types(property_nm)
+        if ref.key_type.rune_ref_tag not in allowed_refs:
             raise ValueError(f'Ref of type {ref.key_type} '
                              f'not allowed for {property_nm}. Allowed types '
-                             f'are: {allowed_ref_types.get(property_nm, {})}')
+                             f'are: {allowed_refs}')
 
         # Pydantic includes inherited fields and resolves their annotations.
         field_type = type(self).model_fields[property_nm].annotation  # type: ignore
         allowed_type = _get_basic_type(field_type)
+        target_obj = (ref.target.enum_instance
+                      if isinstance(ref.target, _EnumWrapper) else ref.target)
         if not (isinstance(allowed_type, str)
-                or isinstance(ref.target, allowed_type)):
+                or isinstance(target_obj, allowed_type)):
             raise TypeError("Can't set reference. Incompatible types: "
                             f"expected {allowed_type}, "
                             f"got {ref.target.__class__}")
 
         refs = self.__dict__.setdefault(REFS_CONTAINER, {})
+        if index is not None:
+            if isinstance(old_val, tuple):
+                old_val = list(old_val)
+                self.__dict__[property_nm] = old_val
+            if not isinstance(old_val, MutableSequence):
+                raise ValueError(f'Property {property_nm} of type '
+                                 f"{type(old_val)} is not a sequence")
+            old_item = old_val[index]
+            prop_refs = refs.get(property_nm)
+            if not isinstance(prop_refs, dict) or index not in prop_refs:
+                if not _replaceable(old_item):
+                    raise ValueError(f'Property {property_nm}[{index}] of type '
+                                     f"{type(old_item)} can't be a reference")
+                # pylint: disable=protected-access
+                if isinstance(old_item, BaseMetaDataMixin):
+                    old_item._check_props_allowed({ref.key_type.rune_ref_tag: ''})
+            if not isinstance(prop_refs, dict):
+                prop_refs = {}
+                refs[property_nm] = prop_refs
+            old_val[index] = ref.target
+            prop_refs[index] = (ref.target_key, ref.key_type)
+            if hasattr(self, '__pydantic_fields_set__'):
+                self.__pydantic_fields_set__.add(property_nm)  # type: ignore
+            return
+
         if property_nm not in refs:
             # not a reference - check if allowed to replace with one
             if not _replaceable(old_val):
@@ -345,6 +418,8 @@ class BaseMetaDataMixin:
         # setattr(self, property_nm, ref.target)  # nope - need to avoid here!
         self.__dict__[property_nm] = ref.target  # NOTE: avoid here setattr
         refs[property_nm] = (ref.target_key, ref.key_type)
+        if hasattr(self, '__pydantic_fields_set__'):
+            self.__pydantic_fields_set__.add(property_nm)  # type: ignore
 
     def _register_keys(self, metadata):
         keys = {
@@ -449,8 +524,17 @@ class ComplexTypeMetaDataMixin(BaseMetaDataMixin):
         return cls  # support for legacy json
 
     @classmethod
-    def serialise(cls, obj) -> dict:
+    def serialise(cls, obj) -> dict | list | None:
         '''used as serialisation method with pydantic'''
+        obj = _unwrap_cow_proxy(obj)
+        if obj is None:
+            return None
+        if isinstance(obj, list):
+            return [cls.serialise(item) for item in obj]
+        if isinstance(obj, UnresolvedReference):
+            return {obj.key_type.rune_ref_tag: obj.key}
+        if isinstance(obj, Reference):
+            return {obj.key_type.rune_ref_tag: obj.target_key}
         res = obj.serialise_meta()
         res |= obj.model_dump(exclude_unset=True, exclude_defaults=True)
         if cls != obj.__class__:
@@ -471,7 +555,7 @@ class ComplexTypeMetaDataMixin(BaseMetaDataMixin):
                 obj._init_meta(allowed_meta)  # pylint: disable=protected-access
             return obj
 
-        if isinstance(obj, Reference):
+        if isinstance(obj, (Reference, UnresolvedReference)):
             return obj
 
         if not isinstance(obj, dict):
@@ -504,7 +588,7 @@ class ComplexTypeMetaDataMixin(BaseMetaDataMixin):
     @lru_cache
     def serializer(cls):
         '''should return the validator for the specific class'''
-        return PlainSerializer(cls.serialise, return_type=dict)
+        return PlainSerializer(cls.serialise, return_type=dict | list | None)
 
     @classmethod
     @lru_cache
@@ -517,6 +601,7 @@ class ComplexTypeMetaDataMixin(BaseMetaDataMixin):
                 return handler(None)
             return cls.deserialize(obj, allowed)
 
+        validate._allowed_meta = allowed  # type: ignore[attr-defined]  # pylint: disable=protected-access
         return WrapValidator(validate, json_schema_input_type=dict)
 
 
@@ -534,9 +619,18 @@ class BasicTypeMetaDataMixin(BaseMetaDataMixin):
                             f' however the value is of type {type(value)}')
 
     @classmethod
-    def serialise(cls, obj, base_type) -> dict:
+    def serialise(cls, obj, base_type) -> dict | list | None:
         '''used as serialisation method with pydantic'''
-        res = obj.serialise_meta()
+        obj = _unwrap_cow_proxy(obj)
+        if obj is None:
+            return None
+        if isinstance(obj, list):
+            return [cls.serialise(item, base_type) for item in obj]
+        if isinstance(obj, UnresolvedReference):
+            return {obj.key_type.rune_ref_tag: obj.key}
+        if isinstance(obj, Reference):
+            return {obj.key_type.rune_ref_tag: obj.target_key}
+        res = obj.serialise_meta() if isinstance(obj, BaseMetaDataMixin) else {}
         res['@data'] = base_type(obj)
         return res
 
@@ -550,6 +644,8 @@ class BasicTypeMetaDataMixin(BaseMetaDataMixin):
             identity = lambda x: x
             processed = [cls.deserialize(item, identity, base_types, allowed_meta) for item in obj]
             return handler(processed)
+        if isinstance(obj, (Reference, UnresolvedReference)):
+            return obj
         model = obj
         if isinstance(obj, base_types) and not isinstance(obj, cls):
             model = cls(obj)  # type: ignore
@@ -569,7 +665,7 @@ class BasicTypeMetaDataMixin(BaseMetaDataMixin):
     def serializer(cls):
         '''should return the validator for the specific class'''
         ser_fn = partial(cls.serialise, base_type=cls._OUTPUT_TYPE)
-        return PlainSerializer(ser_fn, return_type=dict)
+        return PlainSerializer(ser_fn, return_type=dict | list | None)
 
     @classmethod
     @lru_cache
@@ -762,11 +858,24 @@ class _EnumWrapper(BaseMetaDataMixin):
 class EnumWithMetaMixin:
     '''holds the metadata associated with a Rune Enum'''
     @classmethod
-    def serialise(cls, obj, handler, info) -> dict:
+    def serialise(cls, obj, handler, info) -> dict | list | None:
         '''used as serialisation method with pydantic'''
-        res = obj.serialise_meta()
-        res['@data'] = handler(obj.enum_instance, info)
-        return res
+        obj = _unwrap_cow_proxy(obj)
+        if obj is None:
+            return None
+        if isinstance(obj, list):
+            return [cls.serialise(item, handler, info) for item in obj]
+        if isinstance(obj, UnresolvedReference):
+            return {obj.key_type.rune_ref_tag: obj.key}
+        if isinstance(obj, Reference):
+            return {obj.key_type.rune_ref_tag: obj.target_key}
+        if isinstance(obj, _EnumWrapper):
+            res = obj.serialise_meta()
+            res['@data'] = obj.value
+            return res
+        if isinstance(obj, Enum):
+            return {'@data': obj.value}
+        return handler(obj)
 
     @classmethod
     def deserialize(cls, obj, allowed_meta: set[str]):
@@ -774,6 +883,8 @@ class EnumWithMetaMixin:
         obj = _unwrap_cow_proxy(obj)
         if isinstance(obj, list):
             return [cls.deserialize(item, allowed_meta) for item in obj]
+        if isinstance(obj, (Reference, UnresolvedReference)):
+            return obj
         model = obj
         if (isinstance(obj, str)
                 and not isinstance(obj, _EnumWrapper)):
@@ -798,7 +909,7 @@ class EnumWithMetaMixin:
     @lru_cache
     def serializer(cls):
         '''should return the validator for the specific class'''
-        return WrapSerializer(cls.serialise, return_type=dict)
+        return WrapSerializer(cls.serialise, return_type=dict | list | None)
 
     @classmethod
     @lru_cache

@@ -36,6 +36,17 @@ class BaseDataClass(BaseModel, ComplexTypeMetaDataMixin):
     def __setattr__(self, name: str, value: Any) -> None:
         if isinstance(value, Reference):
             self._bind_property_to(name, value)
+        elif (isinstance(value, (MutableSequence, tuple))
+              and any(isinstance(item, Reference) for item in value)):
+            if name in self._get_rune_refs_container():
+                self._remove_rune_ref(name)
+            items = list(value)
+            super().__setattr__(name, items)
+            for idx, item in enumerate(items):
+                if isinstance(item, Reference):
+                    self._bind_property_to(name, item, index=idx)
+                elif isinstance(item, BaseMetaDataMixin):
+                    item._set_rune_parent(self)
         else:
             # replace reference with an object
             if name in self._get_rune_refs_container():
@@ -49,6 +60,10 @@ class BaseDataClass(BaseModel, ComplexTypeMetaDataMixin):
             # if the value is a "model", register as rune_parent
             if isinstance(value, BaseMetaDataMixin):
                 value._set_rune_parent(self)
+            elif isinstance(value, (MutableSequence, tuple)):
+                for item in value:
+                    if isinstance(item, BaseMetaDataMixin):
+                        item._set_rune_parent(self)
             super().__setattr__(name, value)
 
     def __eq__(self, other: Any) -> bool:
@@ -151,8 +166,18 @@ class BaseDataClass(BaseModel, ComplexTypeMetaDataMixin):
         '''should replace objects with refs while serializing'''
         res = serializer(self)
         refs = self._get_rune_refs_container()
-        for property_nm, (key, ref_type) in refs.items():
-            res[property_nm] = {ref_type.rune_ref_tag: key}
+        for property_nm, ref_entry in refs.items():
+            if isinstance(ref_entry, dict):
+                seq = res.get(property_nm)
+                if isinstance(seq, MutableSequence):
+                    seq = list(seq)
+                    for idx, (key, ref_type) in ref_entry.items():
+                        if 0 <= idx < len(seq):
+                            seq[idx] = {ref_type.rune_ref_tag: key}
+                    res[property_nm] = seq
+            else:
+                key, ref_type = ref_entry
+                res[property_nm] = {ref_type.rune_ref_tag: key}
         res = self.__dict__.get(ROOT_CONTAINER, {}) | res
         return res
 
@@ -166,6 +191,11 @@ class BaseDataClass(BaseModel, ComplexTypeMetaDataMixin):
             if aux := cls._create_unresolved_ref(metadata):
                 return aux
         obj = handler(data)
+        # transfer refs that were established on the original before
+        # re-validation wiped them, and before _init_rune_parent runs
+        if isinstance(data, BaseDataClass) and not obj._get_rune_refs_container():
+            if original_refs := data._get_rune_refs_container():
+                obj.__dict__[REFS_CONTAINER] = copy.deepcopy(original_refs)
         obj._init_rune_parent()  # pylint: disable=protected-access
         if isinstance(data, dict):
             # Deferred annotations can bypass the field metadata validator.
@@ -177,26 +207,31 @@ class BaseDataClass(BaseModel, ComplexTypeMetaDataMixin):
                 obj.set_meta(check_allowed=False, **keys)
                 obj._register_keys(keys)  # pylint: disable=protected-access
         obj.resolve_references(ignore_dangling=True, recurse=False)
-        # transfer refs that were established on the original before 
-        # re-validation wiped them
-        if isinstance(data, BaseDataClass) and not obj._get_rune_refs_container():
-            if original_refs := data._get_rune_refs_container():
-                obj.__dict__[REFS_CONTAINER] = dict(original_refs)
         return obj
 
-    def _init_rune_parent(self):
+    def _init_rune_parent(self, recurse: bool = False):
         '''sets the rune parent in all properties'''
         refs = self._get_rune_refs_container()
         if not self.get_rune_parent() and RUNE_OBJ_MAPS not in self.__dict__:
             self.__dict__[RUNE_OBJ_MAPS] = {}
 
         for prop_nm, obj in self.__dict__.items():
-            if prop_nm.startswith('__') or prop_nm in refs:
+            if prop_nm.startswith('__'):
                 continue
-            children = obj if isinstance(obj, (MutableSequence, tuple)) else (obj,)
-            for child in children:
-                if isinstance(child, BaseMetaDataMixin):
-                    child._set_rune_parent(self)  # pylint: disable=protected-access
+            prop_refs = refs.get(prop_nm)
+            if prop_refs is not None and not isinstance(prop_refs, dict):
+                continue
+            if isinstance(obj, (MutableSequence, tuple)):
+                ref_indices = prop_refs if isinstance(prop_refs, dict) else ()
+                for idx, child in enumerate(obj):
+                    if idx not in ref_indices and isinstance(child, BaseMetaDataMixin):
+                        child._set_rune_parent(self)  # pylint: disable=protected-access
+                        if recurse and isinstance(child, BaseDataClass):
+                            child._init_rune_parent(recurse=True)  # pylint: disable=protected-access
+            elif isinstance(obj, BaseMetaDataMixin):
+                obj._set_rune_parent(self)  # pylint: disable=protected-access
+                if recurse and isinstance(obj, BaseDataClass):
+                    obj._init_rune_parent(recurse=True)  # pylint: disable=protected-access
 
     def rune_serialize(
         self,
@@ -364,25 +399,42 @@ class BaseDataClass(BaseModel, ComplexTypeMetaDataMixin):
             for prop_nm, obj in self.__dict__.items():
                 # Follow containment only; resolved references can point back
                 # to an ancestor and must not be traversed again.
-                if prop_nm.startswith('__') or prop_nm in resolved_refs:
+                if prop_nm.startswith('__'):
                     continue
-                children = obj if isinstance(obj, (MutableSequence, tuple)) else (obj,)
-                for child in children:
-                    if isinstance(child, BaseDataClass):
-                        child.resolve_references(ignore_dangling=ignore_dangling,
-                                                 recurse=recurse)
+                prop_refs = resolved_refs.get(prop_nm)
+                if prop_refs is not None and not isinstance(prop_refs, dict):
+                    continue
+                if isinstance(obj, (MutableSequence, tuple)):
+                    ref_indices = prop_refs if isinstance(prop_refs, dict) else ()
+                    for idx, child in enumerate(obj):
+                        if idx not in ref_indices and isinstance(child, BaseDataClass):
+                            child.resolve_references(ignore_dangling=ignore_dangling,
+                                                     recurse=recurse)
+                elif isinstance(obj, BaseDataClass):
+                    obj.resolve_references(ignore_dangling=ignore_dangling,
+                                           recurse=recurse)
 
-        refs = []
+        refs: list[tuple[str, Reference, int | None]] = []
         for prop_nm, obj in self.__dict__.items():
+            if prop_nm.startswith('__'):
+                continue
             if isinstance(obj, (UnresolvedReference, Reference)):
                 try:
-                    refs.append((prop_nm, obj.get_reference(self)))
+                    refs.append((prop_nm, obj.get_reference(self), None))
                 except KeyError:
                     if not ignore_dangling:
                         raise
+            elif isinstance(obj, (MutableSequence, tuple)):
+                for idx, item in enumerate(obj):
+                    if isinstance(item, (UnresolvedReference, Reference)):
+                        try:
+                            refs.append((prop_nm, item.get_reference(self), idx))
+                        except KeyError:
+                            if not ignore_dangling:
+                                raise
 
-        for prop_nm, ref in refs:
-            self._bind_property_to(prop_nm, ref)
+        for prop_nm, ref, idx in refs:
+            self._bind_property_to(prop_nm, ref, index=idx)
 
     def validate_model(self,
                        check_rune_constraints=True,
@@ -422,6 +474,8 @@ class BaseDataClass(BaseModel, ComplexTypeMetaDataMixin):
             if raise_exc:
                 raise validation_error
             return [validation_error]
+        finally:
+            self._init_rune_parent(recurse=True)
         return []
 
     def validate_conditions(self,

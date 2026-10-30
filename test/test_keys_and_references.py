@@ -1,13 +1,14 @@
 '''test key generation/retrieval runtime functions'''
 import json
 from decimal import Decimal
+from typing import Optional
 from typing_extensions import Annotated
 import pytest
 from pydantic import Field, ValidationError
 
 from rune.runtime.base_data_class import BaseDataClass
 from rune.runtime.cow import rune_cow
-from rune.runtime.metadata import Reference, KeyType
+from rune.runtime.metadata import BaseReference, Reference, KeyType, UnresolvedReference
 from rune.runtime.metadata import NumberWithMeta, StrWithMeta
 
 
@@ -595,5 +596,156 @@ def test_unresolved_ref_dangling_behavior():
     model = DummyLoan2.model_validate_json(json_str)
     with pytest.raises(KeyError):
         model.resolve_references(ignore_dangling=False, recurse=False)
+
+
+class Observation(BaseDataClass):
+    '''minimal observation model for list-reference tests (Issue #43)'''
+    value: str = Field(...)
+
+
+class Reset(BaseDataClass):
+    '''model with both single-cardinality and multi-cardinality reference fields'''
+    primaryObservation: Optional[Annotated[
+        Observation,
+        Observation.serializer(),
+        Observation.validator(('@key', '@ref')),
+    ]] = Field(None)
+
+    observations: Annotated[
+        list[Observation | BaseReference | None],
+        Observation.serializer(),
+        Observation.validator(('@key', '@ref')),
+    ] = Field(default_factory=list)
+
+
+class BasicListRefModel(BaseDataClass):
+    '''model with a list of basic-type references'''
+    primaryTag: Annotated[
+        StrWithMeta,
+        StrWithMeta.serializer(),
+        StrWithMeta.validator(('@key', '@key:external')),
+    ] = Field(...)
+    tags: Annotated[
+        list[StrWithMeta | BaseReference],
+        StrWithMeta.serializer(),
+        StrWithMeta.validator(('@key', '@ref', '@ref:external')),
+    ] = Field(default_factory=list)
+
+
+@pytest.mark.parametrize('validate_model', [False, True])
+def test_resolve_references_in_list_fields_and_roundtrip(validate_model):
+    '''Issue #43: references held in list fields must resolve to target objects
+    and serialize back as reference dicts.'''
+    data = {
+        'primaryObservation': {'@key': 'obs-1', 'value': '1.234'},
+        'observations': [
+            {'@ref': 'obs-1'},
+        ],
+    }
+
+    model = Reset.rune_deserialize(data, validate_model=validate_model)
+
+    assert isinstance(model.primaryObservation, Observation)
+    assert isinstance(model.observations[0], Observation)
+    assert model.observations[0] is model.primaryObservation
+    assert model.resolve_ref_key('observations') == ['obs-1']
+    assert model.resolve_ref_key('observations', 0) == 'obs-1'
+    assert model.resolve_ref_key('observations', 1) is None
+
+    serialized = json.loads(model.rune_serialize(validate_model=validate_model))
+    assert serialized['primaryObservation'] == {'@key': 'obs-1', 'value': '1.234'}
+    assert serialized['observations'] == [{'@ref': 'obs-1'}]
+
+
+def test_mixed_list_of_inline_objects_and_references():
+    '''Lists containing both inline keyed objects and references must resolve,
+    preserve parent links, and roundtrip cleanly.'''
+    data = {
+        'primaryObservation': {'@key': 'obs-1', 'value': '1.234'},
+        'observations': [
+            {'@ref': 'obs-1'},
+            {'@key': 'obs-2', 'value': '2.500'},
+            {'@ref': 'obs-2'},
+        ],
+    }
+
+    model = Reset.rune_deserialize(data)
+
+    assert model.observations[0] is model.primaryObservation
+    assert isinstance(model.observations[1], Observation)
+    assert model.observations[1].value == '2.500'
+    assert model.observations[2] is model.observations[1]
+    assert model.primaryObservation.get_rune_parent() is model
+    assert model.observations[1].get_rune_parent() is model
+    assert model.resolve_ref_key('observations') == ['obs-1', 'obs-2']
+    assert model.resolve_ref_key('observations', 0) == 'obs-1'
+    assert model.resolve_ref_key('observations', 1) is None
+    assert model.resolve_ref_key('observations', 2) == 'obs-2'
+
+    dumped = model.model_dump(exclude_unset=True)
+    assert dumped['observations'] == [
+        {'@ref': 'obs-1'},
+        {'@key': 'obs-2', 'value': '2.500'},
+        {'@ref': 'obs-2'},
+    ]
+
+
+def test_assign_and_replace_list_of_references():
+    '''Assigning a list containing Reference objects binds each reference index,
+    and reassigning inline objects clears the reference bindings.'''
+    obs1 = Observation(value='1.0')
+    obs2 = Observation(value='2.0')
+    model = Reset(primaryObservation=obs1)
+
+    model.observations = [Reference(model.primaryObservation), obs2]
+
+    assert model.observations[0] is model.primaryObservation
+    assert model.observations[1] is obs2
+    assert obs2.get_rune_parent() is model
+    assert model.resolve_ref_key('observations') == [model.primaryObservation.get_meta('key')]
+
+    dumped = model.model_dump(exclude_unset=True)
+    assert dumped['observations'][0] == {'@ref': model.primaryObservation.get_meta('key')}
+    assert dumped['observations'][1] == {'value': '2.0'}
+
+    replacement = Observation(value='3.0')
+    model.observations = [replacement]
+    assert model.resolve_ref_key('observations') is None
+    assert replacement.get_rune_parent() is model
+
+
+def test_list_reference_dangling_behavior():
+    '''Dangling references inside list fields respect ignore_dangling.'''
+    data = {
+        'primaryObservation': {'@key': 'obs-1', 'value': '1.234'},
+        'observations': [{'@ref': 'obs-1'}, {'@ref': 'missing-obs'}],
+    }
+    model = Reset.model_validate(data)
+    assert model.observations[0] is model.primaryObservation
+    assert isinstance(model.observations[1], UnresolvedReference)
+
+    with pytest.raises(KeyError, match='missing-obs'):
+        model.resolve_references(ignore_dangling=False, recurse=False)
+
+
+def test_basic_type_list_reference_resolution_and_roundtrip():
+    '''List fields of annotated basic types must also resolve and serialize refs.'''
+    data = {
+        'primaryTag': {'@key:external': 'tag-1', '@data': 'PRIME'},
+        'tags': [
+            {'@ref:external': 'tag-1'},
+            {'@data': 'SECONDARY'},
+        ],
+    }
+    model = BasicListRefModel.rune_deserialize(data)
+    assert model.tags[0] is model.primaryTag
+    assert model.tags[1] == 'SECONDARY'
+    assert model.resolve_ref_key('tags') == ['tag-1']
+
+    dumped = model.model_dump(exclude_unset=True)
+    assert dumped['tags'] == [
+        {'@ref:external': 'tag-1'},
+        {'@data': 'SECONDARY'},
+    ]
 
 # EOF
