@@ -11,7 +11,8 @@ from pydantic import (BaseModel, ValidationError, ConfigDict, model_serializer,
 from pydantic.main import IncEx
 from rune.runtime.conditions import ConditionViolationError
 from rune.runtime.conditions import get_conditions
-from rune.runtime.metadata import (REFS_CONTAINER, ComplexTypeMetaDataMixin, Reference,
+from rune.runtime.metadata import (PARENT_PROP, REFS_CONTAINER,
+                                   ComplexTypeMetaDataMixin, Reference,
                                    UnresolvedReference, BaseMetaDataMixin,
                                    _EnumWrapper, RUNE_OBJ_MAPS)
 
@@ -39,10 +40,10 @@ class BaseDataClass(BaseModel, ComplexTypeMetaDataMixin):
             # replace reference with an object
             if name in self._get_rune_refs_container():
                 self._remove_rune_ref(name)
-                if isinstance(self.__dict__[name], _EnumWrapper):
+                if isinstance(self.__dict__.get(name), _EnumWrapper):
                     self.__dict__[name] = _EnumWrapper()
             # if the value is an enum, pass it to the EnumWrapper
-            if (isinstance(self.__dict__[name], _EnumWrapper)
+            if (isinstance(self.__dict__.get(name), _EnumWrapper)
                     and not isinstance(value, _EnumWrapper)):
                 value = _EnumWrapper(value)
             # if the value is a "model", register as rune_parent
@@ -73,6 +74,47 @@ class BaseDataClass(BaseModel, ComplexTypeMetaDataMixin):
             return self_vals == other_vals
 
         return NotImplemented
+
+    def __copy__(self) -> Self:
+        '''Return a detached shallow copy without retaining the parent link.'''
+        clone = super().__copy__()
+        clone.__dict__.pop(PARENT_PROP, None)
+        return clone
+
+    def __deepcopy__(self, memo: dict[int, Any] | None = None) -> Self:
+        '''Return a deep copy of the subtree without following parent links.'''
+        if memo is None:
+            memo = {}
+        clone = self.__copy__()
+        memo[id(self)] = clone
+        object.__setattr__(clone, '__dict__', self._deepcopy_rune_dict(memo))
+        if clone.__pydantic_extra__ is not None:
+            object.__setattr__(
+                clone,
+                '__pydantic_extra__',
+                copy.deepcopy(clone.__pydantic_extra__, memo),
+            )
+        if clone.__pydantic_private__ is not None:
+            object.__setattr__(
+                clone,
+                '__pydantic_private__',
+                copy.deepcopy(clone.__pydantic_private__, memo),
+            )
+        self._restore_child_parents(clone, memo)
+        return clone
+
+    def _restore_child_parents(self, clone: Self, memo: dict[int, Any]) -> None:
+        '''Ensure direct children whose parent was self point to clone.'''
+        for prop_nm, obj in self.__dict__.items():
+            if prop_nm.startswith('__'):
+                continue
+            children = obj if isinstance(obj, (MutableSequence, tuple)) else (obj,)
+            for child in children:
+                if (isinstance(child, BaseMetaDataMixin)
+                        and child.get_rune_parent() is self):
+                    child_clone = memo.get(id(child))
+                    if isinstance(child_clone, BaseMetaDataMixin):
+                        child_clone.__dict__[PARENT_PROP] = clone
 
     @classmethod
     def _unwrap_cow_validation_input(cls, data: Any) -> Any:

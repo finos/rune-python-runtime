@@ -257,6 +257,25 @@ class BaseMetaDataMixin:
         '''the parent object'''
         return self.__dict__.get(PARENT_PROP)
 
+    def _copy_rune_dict(self) -> dict[str, Any]:
+        '''Shallow-copy instance attributes without retaining the parent link.'''
+        copied = copy.copy(self.__dict__)
+        copied.pop(PARENT_PROP, None)
+        return copied
+
+    def _deepcopy_rune_dict(self, memo: dict[int, Any]) -> dict[str, Any]:
+        '''Deep-copy instance attributes without walking up the parent chain.'''
+        parent = self.__dict__.get(PARENT_PROP)
+        cloned_parent = memo.get(id(parent)) if parent is not None else None
+        copied = {
+            k: copy.deepcopy(v, memo)
+            for k, v in self.__dict__.items()
+            if k != PARENT_PROP
+        }
+        if cloned_parent is not None:
+            copied[PARENT_PROP] = cloned_parent
+        return copied
+
     def resolve_ref_key(self, property_name: str) -> Any:
         ''' if the property exists and it is a reference, return the reference,
             otherwise return None
@@ -562,6 +581,19 @@ class BasicTypeMetaDataMixin(BaseMetaDataMixin):
                                      allowed_meta=allowed),
                              json_schema_input_type=cls._JSON_OUTPUT)
 
+    def __copy__(self) -> Self:
+        '''Copy the value and share its attribute values without parent links.'''
+        clone = type(self)(self)  # type: ignore
+        clone.__dict__.update(self._copy_rune_dict())
+        return clone
+
+    def __deepcopy__(self, memo: dict[int, Any]) -> Self:
+        '''Deep-copy attributes while preserving cycles and in-subtree parents.'''
+        clone = type(self)(self)  # type: ignore
+        memo[id(self)] = clone
+        clone.__dict__.update(self._deepcopy_rune_dict(memo))
+        return clone
+
 
 class _DateTimeCopyMixin:
     '''Copy temporal values without using their bytes-based pickle protocol.'''
@@ -569,14 +601,14 @@ class _DateTimeCopyMixin:
     def __copy__(self) -> Self:
         '''Copy the value and share its attribute values.'''
         clone = type(self)(self)  # type: ignore
-        clone.__dict__.update(self.__dict__)
+        clone.__dict__.update(self._copy_rune_dict())  # type: ignore
         return clone
 
     def __deepcopy__(self, memo: dict[int, Any]) -> Self:
         '''Deep-copy attributes while preserving cycles and shared values.'''
         clone = type(self)(self)  # type: ignore
         memo[id(self)] = clone
-        clone.__dict__.update(copy.deepcopy(self.__dict__, memo))
+        clone.__dict__.update(self._deepcopy_rune_dict(memo))  # type: ignore
         return clone
 
 
@@ -658,7 +690,7 @@ class IntWithMeta(int, BasicTypeMetaDataMixin):
         return obj
 
 
-class NumberWithMeta(Decimal, BasicTypeMetaDataMixin):
+class NumberWithMeta(_DateTimeCopyMixin, Decimal, BasicTypeMetaDataMixin):
     '''annotated number'''
     _INPUT_TYPES = (Decimal, float, int, str)
     _OUTPUT_TYPE = Decimal
@@ -712,6 +744,19 @@ class _EnumWrapper(BaseMetaDataMixin):
 
     def __hash__(self):
         return hash(self._enum_instance)
+
+    def __copy__(self) -> Self:
+        '''Copy the enum wrapper without retaining its parent link.'''
+        clone = type(self)(self._enum_instance)
+        clone.__dict__.update(self._copy_rune_dict())
+        return clone
+
+    def __deepcopy__(self, memo: dict[int, Any]) -> Self:
+        '''Deep-copy the enum wrapper without walking up the parent chain.'''
+        clone = type(self)(self._enum_instance)
+        memo[id(self)] = clone
+        clone.__dict__.update(self._deepcopy_rune_dict(memo))
+        return clone
 
 
 class EnumWithMetaMixin:
