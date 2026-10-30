@@ -6,7 +6,8 @@ import copy
 import datetime
 import importlib
 import uuid
-from collections.abc import Iterable
+import weakref
+from collections.abc import Iterable, MutableSequence
 from decimal import Decimal
 from enum import Enum
 from functools import lru_cache, partial
@@ -38,8 +39,28 @@ def _py_to_ser_key(key: str) -> str:
 def _get_basic_type(annotated_type):
     embedded_type = get_args(annotated_type)
     if embedded_type:
+        for arg in embedded_type:
+            if arg is type(None) or (
+                isinstance(arg, type) and issubclass(arg, BaseReference)
+            ):
+                continue
+            return _get_basic_type(arg)
         return _get_basic_type(embedded_type[0])
     return annotated_type
+
+
+def _extract_allowed_refs(tp_or_meta: Any) -> set[str]:
+    '''Extract allowed @ref tags from field validator metadata or annotations.'''
+    allowed: set[str] = set()
+    func = getattr(tp_or_meta, 'func', tp_or_meta)
+    meta = getattr(func, '_allowed_meta', None)
+    if meta is None and isinstance(func, partial):
+        meta = func.keywords.get('allowed_meta')
+    if meta:
+        allowed.update(m for m in meta if m.startswith('@ref'))
+    for arg in get_args(tp_or_meta):
+        allowed.update(_extract_allowed_refs(arg))
+    return allowed
 
 
 def _unwrap_cow_proxy(value: Any) -> Any:
@@ -147,6 +168,277 @@ class UnresolvedReference(BaseReference):
     def get_reference(self, parent):
         '''convert to a resolved reference'''
         return Reference(self.key, key_type=self.key_type, parent=parent)
+
+
+_MISSING = object()
+
+
+class _ReferenceList(list):
+    '''List subclass that keeps per-element Rune reference bindings in sync.'''
+
+    def __init__(
+        self,
+        iterable: Iterable[Any] = (),
+        *,
+        ref_entries: (
+            Iterable[tuple[str, KeyType] | None]
+            | dict[int, tuple[str, KeyType]]
+            | None
+        ) = None,
+        owner: Any | None = None,
+        prop_name: str | None = None,
+    ):
+        items = list(iterable)
+        super().__init__(items)
+        if isinstance(ref_entries, dict):
+            self._ref_entries: list[tuple[str, KeyType] | None] = [
+                ref_entries.get(idx) for idx in range(len(items))
+            ]
+        elif ref_entries is not None:
+            entries = list(ref_entries)
+            if len(entries) < len(items):
+                entries.extend([None] * (len(items) - len(entries)))
+            self._ref_entries = entries[:len(items)]
+        elif isinstance(iterable, _ReferenceList):
+            self._ref_entries = list(iterable._ref_entries[:len(items)])
+        else:
+            self._ref_entries = [None] * len(items)
+        self._owner_ref = weakref.ref(owner) if owner is not None else None
+        self._prop_name = prop_name
+
+    def _owner(self) -> Any | None:
+        return self._owner_ref() if self._owner_ref is not None else None
+
+    def _bind_owner(self, owner: Any, prop_name: str) -> None:
+        self._owner_ref = weakref.ref(owner)
+        self._prop_name = prop_name
+        self._sync_owner_refs()
+
+    def _sync_owner_refs(self) -> None:
+        owner = self._owner()
+        if owner is None or not self._prop_name:
+            return
+        refs = owner.__dict__.setdefault(REFS_CONTAINER, {})
+        mapping = {
+            idx: entry
+            for idx, entry in enumerate(self._ref_entries)
+            if entry is not None
+        }
+        if mapping:
+            refs[self._prop_name] = mapping
+        else:
+            refs.pop(self._prop_name, None)
+
+    def _prepare_element(
+        self,
+        item: Any,
+        existing_entry: tuple[str, KeyType] | None = None,
+        current_item: Any = _MISSING,
+        is_already_ref: bool = False,
+        index: int | None = None,
+    ) -> tuple[Any, tuple[str, KeyType] | None]:
+        item = _unwrap_cow_proxy(item)
+        owner = self._owner()
+        prop_name = self._prop_name
+        if isinstance(item, Reference):
+            if owner is not None and prop_name:
+                # pylint: disable=protected-access
+                owner._validate_ref_for_property(
+                    prop_name,
+                    item,
+                    current_item=current_item,
+                    is_already_ref=is_already_ref,
+                    index=index,
+                )
+            return item.target, (item.target_key, item.key_type)
+        if existing_entry is not None:
+            key, key_type = existing_entry
+            if owner is not None:
+                try:
+                    registered = owner.get_object_by_key(key, key_type)
+                except KeyError:
+                    registered = None
+                if registered is not None:
+                    if item is registered or (
+                        isinstance(item, BaseMetaDataMixin)
+                        and item.get_meta(key_type.key_tag) == key
+                    ):
+                        return registered, existing_entry
+                    return item, None
+            if (
+                isinstance(item, BaseMetaDataMixin)
+                and item.get_meta(key_type.key_tag) == key
+            ):
+                return item, existing_entry
+        return item, None
+
+    def _attach_inline_parent(
+        self,
+        item: Any,
+        entry: tuple[str, KeyType] | None,
+    ) -> None:
+        owner = self._owner()
+        if (
+            owner is not None
+            and entry is None
+            and isinstance(item, BaseMetaDataMixin)
+        ):
+            # pylint: disable=protected-access
+            item._set_rune_parent(owner)
+
+    def __getitem__(self, index):
+        result = super().__getitem__(index)
+        if isinstance(index, slice):
+            return _ReferenceList(
+                result,
+                ref_entries=self._ref_entries[index],
+            )
+        return result
+
+    def __setitem__(self, index, value) -> None:
+        if isinstance(index, slice):
+            if isinstance(value, _ReferenceList):
+                raw_items = list(value)
+                raw_entries = list(value._ref_entries)
+            else:
+                raw_items = list(value)
+                raw_entries = [None] * len(raw_items)
+            prepared = [
+                self._prepare_element(v, existing_entry=e)
+                for v, e in zip(raw_items, raw_entries)
+            ]
+            new_items = [p[0] for p in prepared]
+            new_entries = [p[1] for p in prepared]
+            super().__setitem__(index, new_items)
+            self._ref_entries[index] = new_entries
+            for item, entry in prepared:
+                self._attach_inline_parent(item, entry)
+            self._sync_owner_refs()
+            return
+
+        old_item = super().__getitem__(index)
+        old_entry = self._ref_entries[index]
+        val, entry = self._prepare_element(
+            value,
+            current_item=old_item,
+            is_already_ref=old_entry is not None,
+            index=index,
+        )
+        super().__setitem__(index, val)
+        self._ref_entries[index] = entry
+        self._attach_inline_parent(val, entry)
+        self._sync_owner_refs()
+
+    def __delitem__(self, index) -> None:
+        super().__delitem__(index)
+        del self._ref_entries[index]
+        self._sync_owner_refs()
+
+    def pop(self, index: int = -1) -> Any:
+        val = super().pop(index)
+        self._ref_entries.pop(index)
+        self._sync_owner_refs()
+        return val
+
+    def append(self, value: Any) -> None:
+        val, entry = self._prepare_element(value)
+        super().append(val)
+        self._ref_entries.append(entry)
+        self._attach_inline_parent(val, entry)
+        self._sync_owner_refs()
+
+    def insert(self, index: int, value: Any) -> None:
+        val, entry = self._prepare_element(value)
+        super().insert(index, val)
+        self._ref_entries.insert(index, entry)
+        self._attach_inline_parent(val, entry)
+        self._sync_owner_refs()
+
+    def extend(self, iterable: Iterable[Any]) -> None:
+        if isinstance(iterable, _ReferenceList):
+            raw_items = list(iterable)
+            raw_entries = list(iterable._ref_entries)
+        else:
+            raw_items = list(iterable)
+            raw_entries = [None] * len(raw_items)
+        prepared = [
+            self._prepare_element(v, existing_entry=e)
+            for v, e in zip(raw_items, raw_entries)
+        ]
+        super().extend(p[0] for p in prepared)
+        self._ref_entries.extend(p[1] for p in prepared)
+        for item, entry in prepared:
+            self._attach_inline_parent(item, entry)
+        self._sync_owner_refs()
+
+    def __iadd__(self, iterable: Iterable[Any]) -> Self:
+        self.extend(iterable)
+        return self
+
+    def __add__(self, other: Any) -> _ReferenceList:
+        if not isinstance(other, list):
+            return super().__add__(other)  # type: ignore[return-value]
+        other_entries = (
+            list(other._ref_entries)
+            if isinstance(other, _ReferenceList)
+            else [None] * len(other)
+        )
+        return _ReferenceList(
+            super().__add__(other),
+            ref_entries=self._ref_entries + other_entries,
+        )
+
+    def __radd__(self, other: Any) -> _ReferenceList:
+        if not isinstance(other, list):
+            return NotImplemented
+        other_entries = (
+            list(other._ref_entries)
+            if isinstance(other, _ReferenceList)
+            else [None] * len(other)
+        )
+        return _ReferenceList(
+            list(other) + list(self),
+            ref_entries=other_entries + self._ref_entries,
+        )
+
+    def reverse(self) -> None:
+        super().reverse()
+        self._ref_entries.reverse()
+        self._sync_owner_refs()
+
+    def clear(self) -> None:
+        super().clear()
+        self._ref_entries.clear()
+        self._sync_owner_refs()
+
+    def remove(self, value: Any) -> None:
+        idx = self.index(value)
+        del self[idx]
+
+    def sort(self, *, key: Any = None, reverse: bool = False) -> None:
+        pairs = list(zip(self, self._ref_entries))
+        if key is None:
+            pairs.sort(key=lambda pair: pair[0], reverse=reverse)
+        else:
+            pairs.sort(key=lambda pair: key(pair[0]), reverse=reverse)
+        super().__setitem__(slice(None), [p[0] for p in pairs])
+        self._ref_entries[:] = [p[1] for p in pairs]
+        self._sync_owner_refs()
+
+    def copy(self) -> _ReferenceList:
+        return _ReferenceList(self, ref_entries=self._ref_entries)
+
+    def __copy__(self) -> _ReferenceList:
+        return self.copy()
+
+    def __deepcopy__(self, memo: dict[int, Any]) -> _ReferenceList:
+        clone = _ReferenceList()
+        memo[id(self)] = clone
+        super(_ReferenceList, clone).extend(
+            copy.deepcopy(item, memo) for item in self
+        )
+        clone._ref_entries = list(self._ref_entries)
+        return clone
 
 
 class BaseMetaDataMixin:
@@ -257,12 +549,55 @@ class BaseMetaDataMixin:
         '''the parent object'''
         return self.__dict__.get(PARENT_PROP)
 
-    def resolve_ref_key(self, property_name: str) -> Any:
+    def _copy_rune_dict(self) -> dict[str, Any]:
+        '''Shallow-copy instance attributes without retaining the parent link.'''
+        copied = copy.copy(self.__dict__)
+        copied.pop(PARENT_PROP, None)
+        return copied
+
+    def _deepcopy_rune_dict(self, memo: dict[int, Any]) -> dict[str, Any]:
+        '''Deep-copy instance attributes without walking up the parent chain.'''
+        parent = self.__dict__.get(PARENT_PROP)
+        cloned_parent = memo.get(id(parent)) if parent is not None else None
+        copied = {
+            k: copy.deepcopy(v, memo)
+            for k, v in self.__dict__.items()
+            if k != PARENT_PROP
+        }
+        if cloned_parent is not None:
+            copied[PARENT_PROP] = cloned_parent
+        return copied
+
+    def resolve_ref_key(self,
+                        property_name: str,
+                        index: int | None = None) -> Any:
         ''' if the property exists and it is a reference, return the reference,
             otherwise return None
         '''
         refs = self._get_rune_refs_container()
-        return refs.get(property_name, [None])[0]
+        entry = refs.get(property_name)
+        if entry is None:
+            return None
+        if isinstance(entry, dict):
+            if index is not None:
+                item = entry.get(index)
+                return item[0] if item is not None else None
+            return [item[0] for _, item in sorted(entry.items())]
+        return entry[0]
+
+    def _get_allowed_ref_types(self, property_nm: str) -> set[str]:
+        '''Return the allowed @ref tags for property_nm.'''
+        if hasattr(self, '_KEY_REF_CONSTRAINTS'):
+            constraints = getattr(self, '_KEY_REF_CONSTRAINTS') or {}
+            return set(constraints.get(property_nm, ()))
+        model_fields = getattr(type(self), 'model_fields', {})
+        field_info = model_fields.get(property_nm)
+        if field_info is None:
+            return set()
+        allowed = _extract_allowed_refs(field_info.annotation)
+        for item in getattr(field_info, 'metadata', ()):
+            allowed.update(_extract_allowed_refs(item))
+        return allowed
 
     def _get_meta_container(self) -> dict[str, Any]:
         return self.__dict__.get(META_CONTAINER, {})
@@ -294,38 +629,96 @@ class BaseMetaDataMixin:
                              f'currently existing meta slots: {current_meta}')
         meta |= {k: None for k in allowed_meta - current_meta}
 
-    def _bind_property_to(self, property_nm: str, ref: Reference):
-        '''set the property to reference the object referenced by the key'''
-        old_val = getattr(self, property_nm)
-        allowed_ref_types = getattr(self, '_KEY_REF_CONSTRAINTS', {})
-        if (ref.key_type.rune_ref_tag not in allowed_ref_types.get(
-                property_nm, {})):  # and not _replaceable(old_val)):
+    def _validate_ref_for_property(
+        self,
+        property_nm: str,
+        ref: Reference,
+        *,
+        current_item: Any = _MISSING,
+        is_already_ref: bool = False,
+        index: int | None = None,
+    ) -> None:
+        '''Validate that ref is permitted and type-compatible for property_nm.'''
+        allowed_refs = self._get_allowed_ref_types(property_nm)
+        if ref.key_type.rune_ref_tag not in allowed_refs:
             raise ValueError(f'Ref of type {ref.key_type} '
                              f'not allowed for {property_nm}. Allowed types '
-                             f'are: {allowed_ref_types.get(property_nm, {})}')
+                             f'are: {allowed_refs}')
 
         # Pydantic includes inherited fields and resolves their annotations.
         field_type = type(self).model_fields[property_nm].annotation  # type: ignore
         allowed_type = _get_basic_type(field_type)
+        target_obj = (ref.target.enum_instance
+                      if isinstance(ref.target, _EnumWrapper) else ref.target)
         if not (isinstance(allowed_type, str)
-                or isinstance(ref.target, allowed_type)):
+                or isinstance(target_obj, allowed_type)):
             raise TypeError("Can't set reference. Incompatible types: "
                             f"expected {allowed_type}, "
                             f"got {ref.target.__class__}")
 
-        refs = self.__dict__.setdefault(REFS_CONTAINER, {})
-        if property_nm not in refs:
-            # not a reference - check if allowed to replace with one
-            if not _replaceable(old_val):
+        if current_item is not _MISSING and not is_already_ref:
+            if not _replaceable(current_item):
+                if index is not None:
+                    raise ValueError(f'Property {property_nm}[{index}] of type '
+                                     f"{type(current_item)} can't be a reference")
                 raise ValueError(f'Property {property_nm} of type '
-                                 f"{type(old_val)} can't be a reference")
+                                 f"{type(current_item)} can't be a reference")
             # pylint: disable=protected-access
-            if isinstance(old_val, BaseMetaDataMixin):
-                old_val._check_props_allowed({ref.key_type.rune_ref_tag: ''})
+            if isinstance(current_item, BaseMetaDataMixin):
+                current_item._check_props_allowed({ref.key_type.rune_ref_tag: ''})
+
+    def _bind_property_to(self,
+                          property_nm: str,
+                          ref: Reference,
+                          index: int | None = None):
+        '''set the property to reference the object referenced by the key'''
+        old_val = getattr(self, property_nm)
+        refs = self.__dict__.setdefault(REFS_CONTAINER, {})
+        if index is not None:
+            if isinstance(old_val, tuple):
+                old_val = list(old_val)
+            if not isinstance(old_val, MutableSequence):
+                raise ValueError(f'Property {property_nm} of type '
+                                 f"{type(old_val)} is not a sequence")
+            old_item = old_val[index]
+            prop_refs = refs.get(property_nm)
+            is_already_ref = isinstance(prop_refs, dict) and index in prop_refs
+            self._validate_ref_for_property(
+                property_nm,
+                ref,
+                current_item=old_item,
+                is_already_ref=is_already_ref,
+                index=index,
+            )
+            if not isinstance(old_val, _ReferenceList):
+                old_val = _ReferenceList(
+                    old_val,
+                    ref_entries=prop_refs if isinstance(prop_refs, dict) else None,
+                    owner=self,
+                    prop_name=property_nm,
+                )
+                self.__dict__[property_nm] = old_val
+            elif old_val._owner() is not self or old_val._prop_name != property_nm:
+                old_val._bind_owner(self, property_nm)
+            super(_ReferenceList, old_val).__setitem__(index, ref.target)
+            old_val._ref_entries[index] = (ref.target_key, ref.key_type)
+            old_val._sync_owner_refs()
+            if hasattr(self, '__pydantic_fields_set__'):
+                self.__pydantic_fields_set__.add(property_nm)  # type: ignore
+            return
+
+        self._validate_ref_for_property(
+            property_nm,
+            ref,
+            current_item=old_val,
+            is_already_ref=property_nm in refs,
+        )
 
         # setattr(self, property_nm, ref.target)  # nope - need to avoid here!
         self.__dict__[property_nm] = ref.target  # NOTE: avoid here setattr
         refs[property_nm] = (ref.target_key, ref.key_type)
+        if hasattr(self, '__pydantic_fields_set__'):
+            self.__pydantic_fields_set__.add(property_nm)  # type: ignore
 
     def _register_keys(self, metadata):
         keys = {
@@ -337,6 +730,9 @@ class BaseMetaDataMixin:
 
     def _get_object_map(self, key_type: KeyType) -> dict[str, Any]:
         if not self.get_rune_parent():
+            object_maps = self.__dict__.setdefault(RUNE_OBJ_MAPS, {})
+            return object_maps.setdefault(key_type, {})
+        if key_type == KeyType.SCOPED and self.is_scope_instance():
             object_maps = self.__dict__.setdefault(RUNE_OBJ_MAPS, {})
             return object_maps.setdefault(key_type, {})
         if local_map := self.__dict__.get(RUNE_OBJ_MAPS, {}).get(key_type):
@@ -430,8 +826,17 @@ class ComplexTypeMetaDataMixin(BaseMetaDataMixin):
         return cls  # support for legacy json
 
     @classmethod
-    def serialise(cls, obj) -> dict:
+    def serialise(cls, obj) -> dict | list | None:
         '''used as serialisation method with pydantic'''
+        obj = _unwrap_cow_proxy(obj)
+        if obj is None:
+            return None
+        if isinstance(obj, list):
+            return [cls.serialise(item) for item in obj]
+        if isinstance(obj, UnresolvedReference):
+            return {obj.key_type.rune_ref_tag: obj.key}
+        if isinstance(obj, Reference):
+            return {obj.key_type.rune_ref_tag: obj.target_key}
         res = obj.serialise_meta()
         res |= obj.model_dump(exclude_unset=True, exclude_defaults=True)
         if cls != obj.__class__:
@@ -452,7 +857,7 @@ class ComplexTypeMetaDataMixin(BaseMetaDataMixin):
                 obj._init_meta(allowed_meta)  # pylint: disable=protected-access
             return obj
 
-        if isinstance(obj, Reference):
+        if isinstance(obj, (Reference, UnresolvedReference)):
             return obj
 
         if not isinstance(obj, dict):
@@ -485,7 +890,7 @@ class ComplexTypeMetaDataMixin(BaseMetaDataMixin):
     @lru_cache
     def serializer(cls):
         '''should return the validator for the specific class'''
-        return PlainSerializer(cls.serialise, return_type=dict)
+        return PlainSerializer(cls.serialise, return_type=dict | list | None)
 
     @classmethod
     @lru_cache
@@ -498,6 +903,7 @@ class ComplexTypeMetaDataMixin(BaseMetaDataMixin):
                 return handler(None)
             return cls.deserialize(obj, allowed)
 
+        validate._allowed_meta = allowed  # type: ignore[attr-defined]  # pylint: disable=protected-access
         return WrapValidator(validate, json_schema_input_type=dict)
 
 
@@ -515,9 +921,18 @@ class BasicTypeMetaDataMixin(BaseMetaDataMixin):
                             f' however the value is of type {type(value)}')
 
     @classmethod
-    def serialise(cls, obj, base_type) -> dict:
+    def serialise(cls, obj, base_type) -> dict | list | None:
         '''used as serialisation method with pydantic'''
-        res = obj.serialise_meta()
+        obj = _unwrap_cow_proxy(obj)
+        if obj is None:
+            return None
+        if isinstance(obj, list):
+            return [cls.serialise(item, base_type) for item in obj]
+        if isinstance(obj, UnresolvedReference):
+            return {obj.key_type.rune_ref_tag: obj.key}
+        if isinstance(obj, Reference):
+            return {obj.key_type.rune_ref_tag: obj.target_key}
+        res = obj.serialise_meta() if isinstance(obj, BaseMetaDataMixin) else {}
         res['@data'] = base_type(obj)
         return res
 
@@ -531,6 +946,8 @@ class BasicTypeMetaDataMixin(BaseMetaDataMixin):
             identity = lambda x: x
             processed = [cls.deserialize(item, identity, base_types, allowed_meta) for item in obj]
             return handler(processed)
+        if isinstance(obj, (Reference, UnresolvedReference)):
+            return obj
         model = obj
         if isinstance(obj, base_types) and not isinstance(obj, cls):
             model = cls(obj)  # type: ignore
@@ -550,7 +967,7 @@ class BasicTypeMetaDataMixin(BaseMetaDataMixin):
     def serializer(cls):
         '''should return the validator for the specific class'''
         ser_fn = partial(cls.serialise, base_type=cls._OUTPUT_TYPE)
-        return PlainSerializer(ser_fn, return_type=dict)
+        return PlainSerializer(ser_fn, return_type=dict | list | None)
 
     @classmethod
     @lru_cache
@@ -562,6 +979,24 @@ class BasicTypeMetaDataMixin(BaseMetaDataMixin):
                                      allowed_meta=allowed),
                              json_schema_input_type=cls._JSON_OUTPUT)
 
+    def __copy__(self) -> Self:
+        '''Copy the value and share its attribute values without parent links.'''
+        clone = type(self)(self)  # type: ignore
+        clone.__dict__.update(self._copy_rune_dict())
+        clone.__dict__.pop(RUNE_OBJ_MAPS, None)
+        clone._register_keys(clone._get_meta_container())
+        return clone
+
+    def __deepcopy__(self, memo: dict[int, Any]) -> Self:
+        '''Deep-copy attributes while preserving cycles and in-subtree parents.'''
+        clone = type(self)(self)  # type: ignore
+        memo[id(self)] = clone
+        clone.__dict__.update(self._deepcopy_rune_dict(memo))
+        if not clone.get_rune_parent():
+            clone.__dict__.pop(RUNE_OBJ_MAPS, None)
+            clone._register_keys(clone._get_meta_container())
+        return clone
+
 
 class _DateTimeCopyMixin:
     '''Copy temporal values without using their bytes-based pickle protocol.'''
@@ -569,14 +1004,19 @@ class _DateTimeCopyMixin:
     def __copy__(self) -> Self:
         '''Copy the value and share its attribute values.'''
         clone = type(self)(self)  # type: ignore
-        clone.__dict__.update(self.__dict__)
+        clone.__dict__.update(self._copy_rune_dict())  # type: ignore
+        clone.__dict__.pop(RUNE_OBJ_MAPS, None)
+        clone._register_keys(clone._get_meta_container())  # type: ignore
         return clone
 
     def __deepcopy__(self, memo: dict[int, Any]) -> Self:
         '''Deep-copy attributes while preserving cycles and shared values.'''
         clone = type(self)(self)  # type: ignore
         memo[id(self)] = clone
-        clone.__dict__.update(copy.deepcopy(self.__dict__, memo))
+        clone.__dict__.update(self._deepcopy_rune_dict(memo))  # type: ignore
+        if not clone.get_rune_parent():  # type: ignore
+            clone.__dict__.pop(RUNE_OBJ_MAPS, None)
+            clone._register_keys(clone._get_meta_container())  # type: ignore
         return clone
 
 
@@ -658,7 +1098,7 @@ class IntWithMeta(int, BasicTypeMetaDataMixin):
         return obj
 
 
-class NumberWithMeta(Decimal, BasicTypeMetaDataMixin):
+class NumberWithMeta(_DateTimeCopyMixin, Decimal, BasicTypeMetaDataMixin):
     '''annotated number'''
     _INPUT_TYPES = (Decimal, float, int, str)
     _OUTPUT_TYPE = Decimal
@@ -713,15 +1153,46 @@ class _EnumWrapper(BaseMetaDataMixin):
     def __hash__(self):
         return hash(self._enum_instance)
 
+    def __copy__(self) -> Self:
+        '''Copy the enum wrapper without retaining its parent link.'''
+        clone = type(self)(self._enum_instance)
+        clone.__dict__.update(self._copy_rune_dict())
+        clone.__dict__.pop(RUNE_OBJ_MAPS, None)
+        clone._register_keys(clone._get_meta_container())
+        return clone
+
+    def __deepcopy__(self, memo: dict[int, Any]) -> Self:
+        '''Deep-copy the enum wrapper without walking up the parent chain.'''
+        clone = type(self)(self._enum_instance)
+        memo[id(self)] = clone
+        clone.__dict__.update(self._deepcopy_rune_dict(memo))
+        if not clone.get_rune_parent():
+            clone.__dict__.pop(RUNE_OBJ_MAPS, None)
+            clone._register_keys(clone._get_meta_container())
+        return clone
+
 
 class EnumWithMetaMixin:
     '''holds the metadata associated with a Rune Enum'''
     @classmethod
-    def serialise(cls, obj, handler, info) -> dict:
+    def serialise(cls, obj, handler, info) -> dict | list | None:
         '''used as serialisation method with pydantic'''
-        res = obj.serialise_meta()
-        res['@data'] = handler(obj.enum_instance, info)
-        return res
+        obj = _unwrap_cow_proxy(obj)
+        if obj is None:
+            return None
+        if isinstance(obj, list):
+            return [cls.serialise(item, handler, info) for item in obj]
+        if isinstance(obj, UnresolvedReference):
+            return {obj.key_type.rune_ref_tag: obj.key}
+        if isinstance(obj, Reference):
+            return {obj.key_type.rune_ref_tag: obj.target_key}
+        if isinstance(obj, _EnumWrapper):
+            res = obj.serialise_meta()
+            res['@data'] = obj.value
+            return res
+        if isinstance(obj, Enum):
+            return {'@data': obj.value}
+        return handler(obj)
 
     @classmethod
     def deserialize(cls, obj, allowed_meta: set[str]):
@@ -729,6 +1200,8 @@ class EnumWithMetaMixin:
         obj = _unwrap_cow_proxy(obj)
         if isinstance(obj, list):
             return [cls.deserialize(item, allowed_meta) for item in obj]
+        if isinstance(obj, (Reference, UnresolvedReference)):
+            return obj
         model = obj
         if (isinstance(obj, str)
                 and not isinstance(obj, _EnumWrapper)):
@@ -753,7 +1226,7 @@ class EnumWithMetaMixin:
     @lru_cache
     def serializer(cls):
         '''should return the validator for the specific class'''
-        return WrapSerializer(cls.serialise, return_type=dict)
+        return WrapSerializer(cls.serialise, return_type=dict | list | None)
 
     @classmethod
     @lru_cache

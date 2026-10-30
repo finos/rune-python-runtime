@@ -11,11 +11,55 @@ from pydantic import (BaseModel, ValidationError, ConfigDict, model_serializer,
 from pydantic.main import IncEx
 from rune.runtime.conditions import ConditionViolationError
 from rune.runtime.conditions import get_conditions
-from rune.runtime.metadata import (REFS_CONTAINER, ComplexTypeMetaDataMixin, Reference,
+from rune.runtime.metadata import (META_CONTAINER, PARENT_PROP, REFS_CONTAINER,
+                                   ComplexTypeMetaDataMixin, KeyType, Reference,
                                    UnresolvedReference, BaseMetaDataMixin,
-                                   _EnumWrapper, RUNE_OBJ_MAPS)
+                                   _EnumWrapper, _ReferenceList,
+                                   _unwrap_cow_proxy, RUNE_OBJ_MAPS)
 
 ROOT_CONTAINER = '__rune_root_metadata'
+_DEEPCOPY_ROOT_KEY = '_rune_deepcopy_root'
+
+
+def _collect_inline_subtree_ids(
+    node: Any,
+    visited: set[int] | None = None,
+) -> set[int]:
+    '''Return object ids of BaseMetaDataMixin nodes in node's inline subtree.'''
+    if visited is None:
+        visited = set()
+    if isinstance(node, (MutableSequence, tuple)):
+        ref_entries = (
+            node._ref_entries  # pylint: disable=protected-access
+            if isinstance(node, _ReferenceList)
+            else None
+        )
+        for idx, item in enumerate(node):
+            if ref_entries is not None and idx < len(ref_entries) and ref_entries[idx] is not None:
+                continue
+            if isinstance(item, BaseMetaDataMixin):
+                _collect_inline_subtree_ids(item, visited)
+        return visited
+
+    if not isinstance(node, BaseMetaDataMixin) or id(node) in visited:
+        return visited
+    visited.add(id(node))
+    if isinstance(node, BaseDataClass):
+        refs = node._get_rune_refs_container()  # pylint: disable=protected-access
+        for prop_nm, child in node.__dict__.items():
+            if prop_nm.startswith('__'):
+                continue
+            prop_refs = refs.get(prop_nm)
+            if prop_refs is not None and not isinstance(prop_refs, dict):
+                continue
+            if isinstance(child, (MutableSequence, tuple)):
+                ref_indices = prop_refs if isinstance(prop_refs, dict) else ()
+                for idx, item in enumerate(child):
+                    if idx not in ref_indices and isinstance(item, BaseMetaDataMixin):
+                        _collect_inline_subtree_ids(item, visited)
+            elif isinstance(child, BaseMetaDataMixin):
+                _collect_inline_subtree_ids(child, visited)
+    return visited
 
 
 class BaseDataClass(BaseModel, ComplexTypeMetaDataMixin):
@@ -32,17 +76,164 @@ class BaseDataClass(BaseModel, ComplexTypeMetaDataMixin):
                               revalidate_instances='always',
                               arbitrary_types_allowed=True)
 
+    def _unregister_replaced_subtree_keys(
+        self,
+        name: str,
+        new_value: Any,
+    ) -> None:
+        '''Remove object-map entries owned by an inline property being replaced.'''
+        refs = self._get_rune_refs_container()
+        prop_refs = refs.get(name)
+        if prop_refs is not None and not isinstance(prop_refs, dict):
+            return
+        old_val = self.__dict__.get(name)
+        if old_val is None or old_val is new_value:
+            return
+        old_ids = _collect_inline_subtree_ids(old_val)
+        if not old_ids:
+            return
+        new_ids = _collect_inline_subtree_ids(new_value)
+        removed_ids = old_ids - new_ids
+        if not removed_ids:
+            return
+        curr: BaseMetaDataMixin | None = self
+        while curr is not None:
+            if obj_maps := curr.__dict__.get(RUNE_OBJ_MAPS):
+                for key_map in obj_maps.values():
+                    stale = [k for k, v in key_map.items() if id(v) in removed_ids]
+                    for k in stale:
+                        del key_map[k]
+            curr = curr.get_rune_parent()
+
+    def _assign_sequence_property(self, name: str, value: Any) -> None:
+        '''Atomically validate and assign a sequence property with references.'''
+        raw_items = list(value)
+        refs_container = self._get_rune_refs_container()
+        existing_refs = refs_container.get(name)
+        existing_seq = self.__dict__.get(name)
+
+        if isinstance(value, _ReferenceList):
+            incoming_entries: list[tuple[str, KeyType] | None] = list(
+                value._ref_entries  # pylint: disable=protected-access
+            )
+            if len(incoming_entries) < len(raw_items):
+                incoming_entries.extend(
+                    [None] * (len(raw_items) - len(incoming_entries))
+                )
+        else:
+            existing_queues: dict[int, list[tuple[str, KeyType] | None]] = {}
+            if isinstance(existing_refs, dict) and isinstance(
+                existing_seq, (MutableSequence, tuple)
+            ):
+                for old_idx, old_item in enumerate(existing_seq):
+                    existing_queues.setdefault(id(old_item), []).append(
+                        existing_refs.get(old_idx)
+                    )
+            incoming_entries = []
+            for item in raw_items:
+                if isinstance(item, Reference):
+                    incoming_entries.append(None)
+                else:
+                    unwrapped_item = _unwrap_cow_proxy(item)
+                    queue = existing_queues.get(id(unwrapped_item))
+                    if queue:
+                        incoming_entries.append(
+                            queue.pop(0) if len(queue) > 1 else queue[0]
+                        )
+                    else:
+                        incoming_entries.append(None)
+
+        old_items = (
+            list(existing_seq)
+            if isinstance(existing_seq, (MutableSequence, tuple))
+            else []
+        )
+        old_ref_indices = (
+            set(existing_refs.keys()) if isinstance(existing_refs, dict) else set()
+        )
+
+        # Step 1: Validate all Reference items before mutating anything on self
+        staged_items: list[Any] = []
+        staged_entries: list[tuple[str, KeyType] | None] = []
+        for idx, raw_item in enumerate(raw_items):
+            item = _unwrap_cow_proxy(raw_item)
+            if isinstance(item, Reference):
+                if idx < len(old_items):
+                    self._validate_ref_for_property(
+                        name,
+                        item,
+                        current_item=old_items[idx],
+                        is_already_ref=idx in old_ref_indices,
+                        index=idx,
+                    )
+                else:
+                    self._validate_ref_for_property(name, item, index=idx)
+                staged_items.append(item.target)
+                staged_entries.append((item.target_key, item.key_type))
+                continue
+
+            entry = incoming_entries[idx] if idx < len(incoming_entries) else None
+            if entry is not None:
+                key, key_type = entry
+                if (
+                    isinstance(item, BaseMetaDataMixin)
+                    and item.get_meta(key_type.key_tag) == key
+                ):
+                    staged_items.append(item)
+                    staged_entries.append(entry)
+                    continue
+
+            staged_items.append(item)
+            staged_entries.append(None)
+
+        # Step 2: Unregister keys owned by replaced inline items
+        if isinstance(value, _ReferenceList) and (
+            value._owner() is None or value._owner() is self  # pylint: disable=protected-access
+        ):
+            ref_list = value
+            super(_ReferenceList, ref_list).__setitem__(slice(None), staged_items)
+            ref_list._ref_entries = staged_entries  # pylint: disable=protected-access
+        else:
+            ref_list = _ReferenceList(staged_items, ref_entries=staged_entries)
+
+        self._unregister_replaced_subtree_keys(name, ref_list)
+
+        # Step 3: Attach inline items first so their keys are registered on self
+        for item, entry in zip(ref_list, staged_entries):
+            if entry is None and isinstance(item, BaseMetaDataMixin):
+                item._set_rune_parent(self)  # pylint: disable=protected-access
+
+        # Step 4: Re-alias preserved reference slots to canonical targets on self
+        for idx, (item, entry) in enumerate(zip(list(ref_list), staged_entries)):
+            if entry is not None and not isinstance(raw_items[idx], Reference):
+                key, key_type = entry
+                try:
+                    registered = self.get_object_by_key(key, key_type)
+                except KeyError:
+                    registered = None
+                if registered is not None and registered is not item:
+                    super(_ReferenceList, ref_list).__setitem__(idx, registered)
+
+        # Step 5: Commit property and synchronize reference container
+        super().__setattr__(name, ref_list)
+        ref_list._bind_owner(self, name)  # pylint: disable=protected-access
+
     def __setattr__(self, name: str, value: Any) -> None:
         if isinstance(value, Reference):
             self._bind_property_to(name, value)
+        elif isinstance(value, (MutableSequence, tuple)) and (
+            not name.startswith('_')
+        ):
+            self._assign_sequence_property(name, value)
         else:
+            self._unregister_replaced_subtree_keys(name, value)
             # replace reference with an object
             if name in self._get_rune_refs_container():
                 self._remove_rune_ref(name)
-                if isinstance(self.__dict__[name], _EnumWrapper):
+                if isinstance(self.__dict__.get(name), _EnumWrapper):
                     self.__dict__[name] = _EnumWrapper()
             # if the value is an enum, pass it to the EnumWrapper
-            if (isinstance(self.__dict__[name], _EnumWrapper)
+            if (isinstance(self.__dict__.get(name), _EnumWrapper)
                     and not isinstance(value, _EnumWrapper)):
                 value = _EnumWrapper(value)
             # if the value is a "model", register as rune_parent
@@ -73,6 +264,279 @@ class BaseDataClass(BaseModel, ComplexTypeMetaDataMixin):
             return self_vals == other_vals
 
         return NotImplemented
+
+    def __copy__(self) -> Self:
+        '''Return a detached shallow copy without retaining the parent link.'''
+        clone = super().__copy__()
+        clone.__dict__.pop(PARENT_PROP, None)
+        if META_CONTAINER in self.__dict__:
+            clone.__dict__[META_CONTAINER] = copy.copy(self.__dict__[META_CONTAINER])
+        if REFS_CONTAINER in self.__dict__:
+            clone.__dict__[REFS_CONTAINER] = copy.deepcopy(self.__dict__[REFS_CONTAINER])
+        for prop_nm, val in list(clone.__dict__.items()):
+            if prop_nm.startswith('__'):
+                continue
+            if isinstance(val, _ReferenceList):
+                ref_copy = val.copy()
+                ref_copy._bind_owner(clone, prop_nm)  # pylint: disable=protected-access
+                clone.__dict__[prop_nm] = ref_copy
+        clone._rebuild_shallow_object_maps()
+        return clone
+
+    def __deepcopy__(self, memo: dict[int, Any] | None = None) -> Self:
+        '''Return a deep copy of the subtree without following parent links.'''
+        if memo is None:
+            memo = {}
+        is_deepcopy_root = _DEEPCOPY_ROOT_KEY not in memo
+        if is_deepcopy_root:
+            memo[_DEEPCOPY_ROOT_KEY] = id(self)
+        try:
+            clone = super().__copy__()
+            clone.__dict__.pop(PARENT_PROP, None)
+            memo[id(self)] = clone
+            object.__setattr__(clone, '__dict__', self._deepcopy_rune_dict(memo))
+            if clone.__pydantic_extra__ is not None:
+                object.__setattr__(
+                    clone,
+                    '__pydantic_extra__',
+                    copy.deepcopy(clone.__pydantic_extra__, memo),
+                )
+            if clone.__pydantic_private__ is not None:
+                object.__setattr__(
+                    clone,
+                    '__pydantic_private__',
+                    copy.deepcopy(clone.__pydantic_private__, memo),
+                )
+            self._restore_child_parents(clone, memo)
+            if is_deepcopy_root:
+                clone._rebuild_subtree_object_maps()
+            return clone
+        finally:
+            if is_deepcopy_root:
+                memo.pop(_DEEPCOPY_ROOT_KEY, None)
+
+    def model_copy(
+        self,
+        *,
+        update: dict[str, Any] | None = None,
+        deep: bool = False,
+    ) -> Self:
+        '''Return a detached model copy with a rebuilt subtree key registry.'''
+        clone = self.__deepcopy__() if deep else self.__copy__()
+        if update:
+            for name, val in update.items():
+                setattr(clone, name, val)
+            if deep:
+                clone._rebuild_subtree_object_maps()
+            else:
+                clone._rebuild_shallow_object_maps()
+        return clone
+
+    def _restore_child_parents(self, clone: Self, memo: dict[int, Any]) -> None:
+        '''Ensure direct children whose parent was self point to clone.'''
+        refs = clone._get_rune_refs_container()
+        for prop_nm, obj in self.__dict__.items():
+            if prop_nm.startswith('__'):
+                continue
+            clone_obj = clone.__dict__.get(prop_nm)
+            if isinstance(clone_obj, _ReferenceList):
+                clone_obj._bind_owner(clone, prop_nm)  # pylint: disable=protected-access
+            prop_refs = refs.get(prop_nm)
+            if prop_refs is not None and not isinstance(prop_refs, dict):
+                continue
+            children = obj if isinstance(obj, (MutableSequence, tuple)) else (obj,)
+            for child in children:
+                if (isinstance(child, BaseMetaDataMixin)
+                        and child.get_rune_parent() is self):
+                    child_clone = memo.get(id(child))
+                    if isinstance(child_clone, BaseMetaDataMixin):
+                        child_clone.__dict__[PARENT_PROP] = clone
+
+    def _rebuild_subtree_object_maps(self) -> None:
+        '''Rebuild key registries from a detached deep-copied subtree.'''
+        self.__dict__.pop(PARENT_PROP, None)
+        self.__dict__[RUNE_OBJ_MAPS] = {}
+        visited: set[int] = set()
+        containment_models: list[BaseDataClass] = []
+
+        def _walk(node: BaseDataClass) -> None:
+            if id(node) in visited:
+                return
+            visited.add(id(node))
+            containment_models.append(node)
+            if node is not self:
+                node.__dict__.pop(RUNE_OBJ_MAPS, None)
+            node._register_keys(node._get_meta_container())
+
+            refs = node._get_rune_refs_container()
+            for prop_nm, obj in list(node.__dict__.items()):
+                if prop_nm.startswith('__'):
+                    continue
+                prop_refs = refs.get(prop_nm)
+                if isinstance(obj, list) and not isinstance(obj, _ReferenceList):
+                    obj = _ReferenceList(
+                        obj,
+                        ref_entries=prop_refs if isinstance(prop_refs, dict) else None,
+                        owner=node,
+                        prop_name=prop_nm,
+                    )
+                    node.__dict__[prop_nm] = obj
+                elif isinstance(obj, _ReferenceList):
+                    obj._bind_owner(node, prop_nm)  # pylint: disable=protected-access
+
+                if prop_refs is not None and not isinstance(prop_refs, dict):
+                    continue
+                if isinstance(obj, (MutableSequence, tuple)):
+                    ref_indices = prop_refs if isinstance(prop_refs, dict) else ()
+                    for idx, child in enumerate(obj):
+                        if idx not in ref_indices and isinstance(child, BaseMetaDataMixin):
+                            child.__dict__[PARENT_PROP] = node
+                            if isinstance(child, BaseDataClass):
+                                _walk(child)
+                            else:
+                                visited.add(id(child))
+                                child.__dict__.pop(RUNE_OBJ_MAPS, None)
+                                child._register_keys(child._get_meta_container())
+                elif isinstance(obj, BaseMetaDataMixin):
+                    obj.__dict__[PARENT_PROP] = node
+                    if isinstance(obj, BaseDataClass):
+                        _walk(obj)
+                    else:
+                        visited.add(id(obj))
+                        obj.__dict__.pop(RUNE_OBJ_MAPS, None)
+                        obj._register_keys(obj._get_meta_container())
+
+        _walk(self)
+
+        # Ensure any resolved references in the detached subtree alias to the
+        # canonical cloned target registered in the subtree key map.
+        for node in containment_models:
+            refs = node._get_rune_refs_container()
+            for prop_nm, ref_entry in list(refs.items()):
+                if isinstance(ref_entry, dict):
+                    node._reconcile_list_refs(prop_nm)
+                else:
+                    key, key_type = ref_entry
+                    try:
+                        registered = node.get_object_by_key(key, key_type)
+                    except KeyError:
+                        registered = None
+                    if registered is not None:
+                        node.__dict__[prop_nm] = registered
+
+    def _rebuild_shallow_object_maps(self) -> None:
+        '''Populate RUNE_OBJ_MAPS on a detached shallow copy without mutating shared children.'''
+        self.__dict__.pop(PARENT_PROP, None)
+        obj_maps: dict[KeyType, dict[str, Any]] = {}
+        visited: set[int] = set()
+
+        def _collect_node_keys(node: BaseMetaDataMixin, inside_nested_scope: bool) -> None:
+            for key_t, key_v in node._get_meta_container().items():
+                if not (key_t.startswith('@key') and key_v):
+                    continue
+                kt = KeyType.from_rune(key_t)
+                if kt == KeyType.SCOPED and inside_nested_scope:
+                    continue
+                obj_maps.setdefault(kt, {})[key_v] = node
+
+        def _walk_shallow(node: BaseDataClass, inside_nested_scope: bool) -> None:
+            if id(node) in visited:
+                return
+            visited.add(id(node))
+            _collect_node_keys(node, inside_nested_scope)
+            next_scope = inside_nested_scope or (
+                node is not self and node.is_scope_instance()
+            )
+            refs = node._get_rune_refs_container()
+            for prop_nm, obj in node.__dict__.items():
+                if prop_nm.startswith('__'):
+                    continue
+                prop_refs = refs.get(prop_nm)
+                if prop_refs is not None and not isinstance(prop_refs, dict):
+                    continue
+                if isinstance(obj, (MutableSequence, tuple)):
+                    ref_indices = prop_refs if isinstance(prop_refs, dict) else ()
+                    for idx, child in enumerate(obj):
+                        if idx not in ref_indices and isinstance(child, BaseMetaDataMixin):
+                            if isinstance(child, BaseDataClass):
+                                _walk_shallow(child, next_scope)
+                            else:
+                                _collect_node_keys(child, next_scope)
+                elif isinstance(obj, BaseMetaDataMixin):
+                    if isinstance(obj, BaseDataClass):
+                        _walk_shallow(obj, next_scope)
+                    else:
+                        _collect_node_keys(obj, next_scope)
+
+        _walk_shallow(self, False)
+        self.__dict__[RUNE_OBJ_MAPS] = obj_maps
+
+    def _reconcile_list_refs(self, prop_nm: str) -> None:
+        '''Ensure a list property is a _ReferenceList with reconciled bindings.'''
+        seq = self.__dict__.get(prop_nm)
+        if not isinstance(seq, list):
+            return
+        refs = self.__dict__.setdefault(REFS_CONTAINER, {})
+        prop_refs = refs.get(prop_nm)
+        if not isinstance(seq, _ReferenceList):
+            seq = _ReferenceList(
+                seq,
+                ref_entries=prop_refs if isinstance(prop_refs, dict) else None,
+                owner=self,
+                prop_name=prop_nm,
+            )
+            self.__dict__[prop_nm] = seq
+        elif seq._owner() is not self or seq._prop_name != prop_nm:  # pylint: disable=protected-access
+            if seq._owner() is not None and seq._owner() is not self:  # pylint: disable=protected-access
+                seq = _ReferenceList(
+                    seq,
+                    ref_entries=seq._ref_entries,  # pylint: disable=protected-access
+                    owner=self,
+                    prop_name=prop_nm,
+                )
+                self.__dict__[prop_nm] = seq
+            else:
+                seq._bind_owner(self, prop_nm)  # pylint: disable=protected-access
+
+        if len(seq._ref_entries) < len(seq):  # pylint: disable=protected-access
+            seq._ref_entries.extend(  # pylint: disable=protected-access
+                [None] * (len(seq) - len(seq._ref_entries))  # pylint: disable=protected-access
+            )
+        elif len(seq._ref_entries) > len(seq):  # pylint: disable=protected-access
+            del seq._ref_entries[len(seq):]  # pylint: disable=protected-access
+
+        for idx, (item, entry) in enumerate(
+            zip(list(seq), list(seq._ref_entries))  # pylint: disable=protected-access
+        ):
+            if entry is None:
+                continue
+            key, key_type = entry
+            if isinstance(item, (Reference, UnresolvedReference)):
+                continue
+            if isinstance(item, BaseMetaDataMixin):
+                item_key = item.get_meta(key_type.key_tag)
+                if item_key != key:
+                    seq._ref_entries[idx] = None  # pylint: disable=protected-access
+                    item._set_rune_parent(self)  # pylint: disable=protected-access
+                else:
+                    try:
+                        registered = self.get_object_by_key(key, key_type)
+                    except KeyError:
+                        registered = None
+                    if registered is not None and registered is not item:
+                        super(_ReferenceList, seq).__setitem__(idx, registered)
+            else:
+                seq._ref_entries[idx] = None  # pylint: disable=protected-access
+
+        seq._sync_owner_refs()  # pylint: disable=protected-access
+
+    def _reconcile_all_list_refs(self) -> None:
+        '''Reconcile all list properties and their reference bindings on self.'''
+        for prop_nm, obj in list(self.__dict__.items()):
+            if prop_nm.startswith('__'):
+                continue
+            if isinstance(obj, list):
+                self._reconcile_list_refs(prop_nm)
 
     @classmethod
     def _unwrap_cow_validation_input(cls, data: Any) -> Any:
@@ -107,10 +571,21 @@ class BaseDataClass(BaseModel, ComplexTypeMetaDataMixin):
     @model_serializer(mode='wrap')
     def _serialize_refs(self, serializer, info):
         '''should replace objects with refs while serializing'''
+        self._reconcile_all_list_refs()
         res = serializer(self)
         refs = self._get_rune_refs_container()
-        for property_nm, (key, ref_type) in refs.items():
-            res[property_nm] = {ref_type.rune_ref_tag: key}
+        for property_nm, ref_entry in refs.items():
+            if isinstance(ref_entry, dict):
+                seq = res.get(property_nm)
+                if isinstance(seq, MutableSequence):
+                    seq = list(seq)
+                    for idx, (key, ref_type) in ref_entry.items():
+                        if 0 <= idx < len(seq):
+                            seq[idx] = {ref_type.rune_ref_tag: key}
+                    res[property_nm] = seq
+            else:
+                key, ref_type = ref_entry
+                res[property_nm] = {ref_type.rune_ref_tag: key}
         res = self.__dict__.get(ROOT_CONTAINER, {}) | res
         return res
 
@@ -123,7 +598,14 @@ class BaseDataClass(BaseModel, ComplexTypeMetaDataMixin):
             metadata = {k: v for k, v in data.items() if k.startswith('@')}
             if aux := cls._create_unresolved_ref(metadata):
                 return aux
+        elif isinstance(data, BaseDataClass):
+            data._reconcile_all_list_refs()  # pylint: disable=protected-access
         obj = handler(data)
+        # transfer refs that were established on the original before
+        # re-validation wiped them, and before _init_rune_parent runs
+        if isinstance(data, BaseDataClass) and not obj._get_rune_refs_container():
+            if original_refs := data._get_rune_refs_container():
+                obj.__dict__[REFS_CONTAINER] = copy.deepcopy(original_refs)
         obj._init_rune_parent()  # pylint: disable=protected-access
         if isinstance(data, dict):
             # Deferred annotations can bypass the field metadata validator.
@@ -135,26 +617,33 @@ class BaseDataClass(BaseModel, ComplexTypeMetaDataMixin):
                 obj.set_meta(check_allowed=False, **keys)
                 obj._register_keys(keys)  # pylint: disable=protected-access
         obj.resolve_references(ignore_dangling=True, recurse=False)
-        # transfer refs that were established on the original before 
-        # re-validation wiped them
-        if isinstance(data, BaseDataClass) and not obj._get_rune_refs_container():
-            if original_refs := data._get_rune_refs_container():
-                obj.__dict__[REFS_CONTAINER] = dict(original_refs)
         return obj
 
-    def _init_rune_parent(self):
+    def _init_rune_parent(self, recurse: bool = False):
         '''sets the rune parent in all properties'''
-        refs = self._get_rune_refs_container()
         if not self.get_rune_parent() and RUNE_OBJ_MAPS not in self.__dict__:
             self.__dict__[RUNE_OBJ_MAPS] = {}
 
-        for prop_nm, obj in self.__dict__.items():
-            if prop_nm.startswith('__') or prop_nm in refs:
+        self._reconcile_all_list_refs()
+        refs = self._get_rune_refs_container()
+
+        for prop_nm, obj in list(self.__dict__.items()):
+            if prop_nm.startswith('__'):
                 continue
-            children = obj if isinstance(obj, (MutableSequence, tuple)) else (obj,)
-            for child in children:
-                if isinstance(child, BaseMetaDataMixin):
-                    child._set_rune_parent(self)  # pylint: disable=protected-access
+            prop_refs = refs.get(prop_nm)
+            if prop_refs is not None and not isinstance(prop_refs, dict):
+                continue
+            if isinstance(obj, (MutableSequence, tuple)):
+                ref_indices = prop_refs if isinstance(prop_refs, dict) else ()
+                for idx, child in enumerate(obj):
+                    if idx not in ref_indices and isinstance(child, BaseMetaDataMixin):
+                        child._set_rune_parent(self)  # pylint: disable=protected-access
+                        if recurse and isinstance(child, BaseDataClass):
+                            child._init_rune_parent(recurse=True)  # pylint: disable=protected-access
+            elif isinstance(obj, BaseMetaDataMixin):
+                obj._set_rune_parent(self)  # pylint: disable=protected-access
+                if recurse and isinstance(obj, BaseDataClass):
+                    obj._init_rune_parent(recurse=True)  # pylint: disable=protected-access
 
     def rune_serialize(
         self,
@@ -317,30 +806,48 @@ class BaseDataClass(BaseModel, ComplexTypeMetaDataMixin):
 
     def resolve_references(self, ignore_dangling=False, recurse=True):
         '''resolves all attributes which are references'''
+        self._reconcile_all_list_refs()
         if recurse:
             resolved_refs = self._get_rune_refs_container()
             for prop_nm, obj in self.__dict__.items():
                 # Follow containment only; resolved references can point back
                 # to an ancestor and must not be traversed again.
-                if prop_nm.startswith('__') or prop_nm in resolved_refs:
+                if prop_nm.startswith('__'):
                     continue
-                children = obj if isinstance(obj, (MutableSequence, tuple)) else (obj,)
-                for child in children:
-                    if isinstance(child, BaseDataClass):
-                        child.resolve_references(ignore_dangling=ignore_dangling,
-                                                 recurse=recurse)
+                prop_refs = resolved_refs.get(prop_nm)
+                if prop_refs is not None and not isinstance(prop_refs, dict):
+                    continue
+                if isinstance(obj, (MutableSequence, tuple)):
+                    ref_indices = prop_refs if isinstance(prop_refs, dict) else ()
+                    for idx, child in enumerate(obj):
+                        if idx not in ref_indices and isinstance(child, BaseDataClass):
+                            child.resolve_references(ignore_dangling=ignore_dangling,
+                                                     recurse=recurse)
+                elif isinstance(obj, BaseDataClass):
+                    obj.resolve_references(ignore_dangling=ignore_dangling,
+                                           recurse=recurse)
 
-        refs = []
+        refs: list[tuple[str, Reference, int | None]] = []
         for prop_nm, obj in self.__dict__.items():
+            if prop_nm.startswith('__'):
+                continue
             if isinstance(obj, (UnresolvedReference, Reference)):
                 try:
-                    refs.append((prop_nm, obj.get_reference(self)))
+                    refs.append((prop_nm, obj.get_reference(self), None))
                 except KeyError:
                     if not ignore_dangling:
                         raise
+            elif isinstance(obj, (MutableSequence, tuple)):
+                for idx, item in enumerate(obj):
+                    if isinstance(item, (UnresolvedReference, Reference)):
+                        try:
+                            refs.append((prop_nm, item.get_reference(self), idx))
+                        except KeyError:
+                            if not ignore_dangling:
+                                raise
 
-        for prop_nm, ref in refs:
-            self._bind_property_to(prop_nm, ref)
+        for prop_nm, ref, idx in refs:
+            self._bind_property_to(prop_nm, ref, index=idx)
 
     def validate_model(self,
                        check_rune_constraints=True,
@@ -380,6 +887,8 @@ class BaseDataClass(BaseModel, ComplexTypeMetaDataMixin):
             if raise_exc:
                 raise validation_error
             return [validation_error]
+        finally:
+            self._init_rune_parent(recurse=True)
         return []
 
     def validate_conditions(self,

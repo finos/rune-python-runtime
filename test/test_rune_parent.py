@@ -1,13 +1,20 @@
 '''test module for rune root lifecycle'''
+import copy
+from enum import Enum
 from typing import Optional, Annotated, ClassVar
 from pydantic import Field
-from rune.runtime.metadata import Reference, KeyType
+from rune.runtime.cow import _clone_for_write, rune_cow, rune_unwrap
+from rune.runtime.metadata import (
+    DateTimeWithMeta, DateWithMeta, EnumWithMetaMixin, IntWithMeta, KeyType,
+    NumberWithMeta, Reference, StrWithMeta, TimeWithMeta, _EnumWrapper,
+)
 from rune.runtime.base_data_class import BaseDataClass
 
 
 class B(BaseDataClass):
     '''no doc'''
     _FQRTN: ClassVar[str] = 'test_rune_parent.B'
+    _ALLOWED_METADATA: ClassVar[set[str]] = {'@key', '@key:external', '@key:scoped'}
     fieldB: str = Field(..., description='')
 
 
@@ -196,5 +203,195 @@ def test_deep_deserialization():
     assert deep.root.typeA == deep.root.typeA.b.get_rune_parent()
     assert deep.root.typeA == deep.root.bAddress.get_rune_parent()
     assert deep.root.typeA.b == deep.root.bAddress
+
+
+class ChainNode(BaseDataClass):
+    '''Recursive chain node for testing parent-detachment on deep graphs.'''
+    _FQRTN: ClassVar[str] = 'test_rune_parent.ChainNode'
+    label: str = Field(..., description='')
+    child: Optional['ChainNode'] = Field(None, description='')
+
+
+ChainNode.model_rebuild()
+
+
+class SampleEnum(EnumWithMetaMixin, Enum):
+    '''Enum with metadata for parent-detachment tests.'''
+    ALPHA = 'ALPHA'
+
+
+def test_clone_for_write_detaches_rune_parent():
+    '''_clone_for_write(child) should produce a detached copy with no
+    rune_parent.'''
+    parent = ChainNode.model_construct(label='parent', child=None)
+    child = ChainNode.model_construct(label='child', child=None)
+    child._set_rune_parent(parent)  # pylint: disable=protected-access
+
+    assert child.get_rune_parent() is parent
+
+    clone = _clone_for_write(child)
+
+    assert clone is not child
+    assert clone.get_rune_parent() is None
+    assert child.get_rune_parent() is parent
+
+
+def test_model_copy_and_deepcopy_detach_subtree_root_and_preserve_descendants():
+    '''Copying a subtree detaches its root while re-parenting its descendants
+    to the cloned subtree.'''
+    rune_dict = {
+        "bAddress": {
+            "@ref:scoped": "aKey3"
+        },
+        "typeA": {
+            "b": {
+                "@key:scoped": "aKey3",
+                "fieldB": "some b content"
+            }
+        },
+    }
+    deep = DeepRef.model_validate({"root": rune_dict})
+
+    # Deep copy of intermediate subtree (root inside deep)
+    root_clone = deep.root.model_copy(deep=True)
+    assert root_clone is not deep.root
+    assert root_clone.get_rune_parent() is None
+    assert root_clone.typeA is not deep.root.typeA
+    assert root_clone.typeA.get_rune_parent() is root_clone
+    assert root_clone.typeA.b is not deep.root.typeA.b
+    assert root_clone.typeA.b.get_rune_parent() is root_clone.typeA
+    assert root_clone.bAddress is root_clone.typeA.b
+    assert root_clone.bAddress.get_rune_parent() is root_clone.typeA
+
+    # Shallow copy also detaches the copied root from its parent
+    shallow_clone = deep.root.model_copy(deep=False)
+    assert shallow_clone.get_rune_parent() is None
+    assert copy.copy(deep.root.typeA).get_rune_parent() is None
+
+    # model_copy(deep=True, update=...) detaches root and preserves child parent
+    updated_clone = deep.root.model_copy(deep=True, update={'bAddress': None})
+    assert updated_clone.get_rune_parent() is None
+    assert updated_clone.bAddress is None
+    assert updated_clone.typeA.get_rune_parent() is updated_clone
+    assert updated_clone.typeA.b.get_rune_parent() is updated_clone.typeA
+
+
+def test_deep_chain_clone_for_write_does_not_walk_ancestors():
+    '''Cloning a leaf in a deep parent chain must not walk up __rune_parent or
+    hit RecursionError.'''
+    depth = 200
+    nodes: list[ChainNode] = []
+    current = ChainNode(label=f'node-{depth}', child=None)
+    nodes.append(current)
+    for idx in range(depth - 1, -1, -1):
+        parent = ChainNode.model_construct(label=f'node-{idx}', child=current)
+        current._set_rune_parent(parent)  # pylint: disable=protected-access
+        nodes.append(parent)
+        current = parent
+
+    leaf = nodes[0]
+    assert leaf.get_rune_parent() is nodes[1]
+
+    copied_ids: set[int] = set()
+    orig_deepcopy = ChainNode.__deepcopy__
+
+    def tracked_deepcopy(self, memo=None):
+        copied_ids.add(id(self))
+        return orig_deepcopy(self, memo)
+
+    ChainNode.__deepcopy__ = tracked_deepcopy  # type: ignore[method-assign]
+    try:
+        leaf_clone = _clone_for_write(leaf)
+    finally:
+        ChainNode.__deepcopy__ = orig_deepcopy  # type: ignore[method-assign]
+
+    assert leaf_clone.get_rune_parent() is None
+    assert leaf_clone.label == f'node-{depth}'
+    # Only the leaf itself should have been deep-copied, never its 200 ancestors
+    assert copied_ids == {id(leaf)}
+
+
+def test_metadata_wrappers_detach_parent_on_direct_copy():
+    '''Direct copy and deepcopy of basic and enum metadata wrappers must not
+    retain an uncopied parent reference.'''
+    parent = B(fieldB='parent')
+    wrappers = [
+        StrWithMeta('hello', scheme='s'),
+        IntWithMeta(7, scheme='s'),
+        NumberWithMeta('3.14', scheme='s'),
+        DateWithMeta('2026-10-30', scheme='s'),
+        TimeWithMeta('12:30:00', scheme='s'),
+        DateTimeWithMeta('2026-10-30T12:30:00', scheme='s'),
+        _EnumWrapper(SampleEnum.ALPHA),
+    ]
+    for wrapper in wrappers:
+        wrapper._set_rune_parent(parent)  # pylint: disable=protected-access
+        assert wrapper.get_rune_parent() is parent
+
+        shallow = copy.copy(wrapper)
+        deep = copy.deepcopy(wrapper)
+        assert shallow.get_rune_parent() is None
+        assert deep.get_rune_parent() is None
+
+
+def test_cow_write_on_child_produces_detached_shadow_rebound_to_parent():
+    '''Mutating a nested child through rune_cow detaches from the original
+    parent and binds the shadow child to the shadow parent.'''
+    root = Root(typeA=A(b=B(fieldB='initial')))
+    proxy = rune_cow(root)
+    proxy.typeA.b.fieldB = 'updated'
+    result = rune_unwrap(proxy)
+
+    assert root.typeA.b.fieldB == 'initial'
+    assert root.typeA.get_rune_parent() is root
+    assert root.typeA.b.get_rune_parent() is root.typeA
+
+    assert result.get_rune_parent() is None
+    assert result.typeA.get_rune_parent() is result
+    assert result.typeA.b.get_rune_parent() is result.typeA
+    assert result.typeA.b.fieldB == 'updated'
+
+
+def test_detached_subtree_copies_rebuild_key_registry():
+    '''Detached copies of nested subtrees rebuild their key registries so
+    Reference(key, parent=clone) and get_object_by_key resolve against the
+    copied subtree rather than raising KeyError.'''
+    rune_dict = {
+        "bAddress": {
+            "@ref:scoped": "aKey3"
+        },
+        "typeA": {
+            "b": {
+                "@key:scoped": "aKey3",
+                "fieldB": "some b content"
+            }
+        },
+    }
+    deep = DeepRef.model_validate({"root": rune_dict})
+    internal_key = deep.root.typeA.b.get_or_create_key()
+
+    # Deep copy of nested model `deep.root` (whose key registry lived on `deep`)
+    root_clone = deep.root.model_copy(deep=True)
+    assert root_clone.get_rune_parent() is None
+    assert root_clone.get_object_by_key("aKey3", KeyType.SCOPED) is root_clone.typeA.b
+    assert root_clone.get_object_by_key(internal_key, KeyType.INTERNAL) is root_clone.typeA.b
+    scoped_ref = Reference("aKey3", key_type=KeyType.SCOPED, parent=root_clone)
+    int_ref = Reference(internal_key, key_type=KeyType.INTERNAL, parent=root_clone)
+    assert scoped_ref.target is root_clone.typeA.b
+    assert int_ref.target is root_clone.typeA.b
+
+    # Deeper nested subtree copy `deep.root.typeA`
+    type_a_clone = _clone_for_write(deep.root.typeA)
+    assert type_a_clone.get_rune_parent() is None
+    assert type_a_clone.get_object_by_key("aKey3", KeyType.SCOPED) is type_a_clone.b
+    assert type_a_clone.get_object_by_key(internal_key, KeyType.INTERNAL) is type_a_clone.b
+    assert Reference("aKey3", key_type=KeyType.SCOPED, parent=type_a_clone).target is type_a_clone.b
+    assert Reference(internal_key, key_type=KeyType.INTERNAL, parent=type_a_clone).target is type_a_clone.b
+
+    # Shallow copy also retains key lookup for its subtree
+    shallow_root = deep.root.model_copy(deep=False)
+    assert shallow_root.get_rune_parent() is None
+    assert Reference("aKey3", key_type=KeyType.SCOPED, parent=shallow_root).target is deep.root.typeA.b
+    assert Reference(internal_key, key_type=KeyType.INTERNAL, parent=shallow_root).target is deep.root.typeA.b
 
 # EOF

@@ -2,10 +2,11 @@
 from __future__ import annotations
 
 import copy
-from collections.abc import MutableMapping, MutableSequence, MutableSet
-from typing import Any, Callable
+from collections.abc import Iterable, MutableMapping, MutableSequence, MutableSet
+from typing import Any, Callable, Self
 
 from rune.runtime.base_data_class import BaseDataClass
+from rune.runtime.metadata import _ReferenceList
 from rune.runtime.object_builder import ObjectBuilder
 from rune.runtime.utils import rune_mangle_name, rune_resolve_attr
 
@@ -219,6 +220,41 @@ class _COWList(_COWBase, MutableSequence):
         shadow.insert(index, rune_unwrap(value))
         self._mark_written()
 
+    def append(self, value: Any) -> None:
+        shadow = self._ensure_shadow()
+        shadow.append(rune_unwrap(value))
+        self._mark_written()
+
+    def extend(self, values: Iterable[Any]) -> None:
+        shadow = self._ensure_shadow()
+        shadow.extend(rune_unwrap(values))
+        self._mark_written()
+
+    def __iadd__(self, values: Iterable[Any]) -> Self:
+        self.extend(values)
+        return self
+
+    def pop(self, index: int = -1) -> Any:
+        shadow = self._ensure_shadow()
+        val = shadow.pop(index)
+        self._mark_written()
+        return val
+
+    def reverse(self) -> None:
+        shadow = self._ensure_shadow()
+        shadow.reverse()
+        self._mark_written()
+
+    def clear(self) -> None:
+        shadow = self._ensure_shadow()
+        shadow.clear()
+        self._mark_written()
+
+    def remove(self, value: Any) -> None:
+        shadow = self._ensure_shadow()
+        shadow.remove(rune_unwrap(value))
+        self._mark_written()
+
     def __iter__(self):
         current = self._current()
         for idx, value in enumerate(current):
@@ -346,6 +382,18 @@ def rune_unwrap(value: Any) -> Any:
                 out.append(value_unwrapped)
                 changed = changed or value_changed
             if changed:
+                if isinstance(item, _ReferenceList):
+                    ref_entries = [
+                        entry if new_val is old_val else None
+                        for old_val, new_val, entry in zip(
+                            item,
+                            out,
+                            item._ref_entries,  # pylint: disable=protected-access
+                        )
+                    ]
+                    wrapped = _ReferenceList(out, ref_entries=ref_entries)
+                    memo[item_id] = wrapped
+                    return wrapped, True
                 return out, True
             memo[item_id] = item
             return item, False
@@ -402,20 +450,21 @@ def rune_unwrap(value: Any) -> Any:
             return item, False
 
         if isinstance(item, BaseDataClass):
-            field_values: dict[str, Any] = {}
+            changed_fields: dict[str, Any] = {}
             changed = False
             field_names = type(item).__pydantic_fields__.keys()
             for name in field_names:
                 current = getattr(item, name)
                 unwrapped, field_changed = _unwrap_inner(current)
-                field_values[name] = unwrapped
-                changed = changed or field_changed
+                if field_changed:
+                    changed_fields[name] = unwrapped
+                    changed = True
             if not changed:
                 return item, False
 
             clone = item.model_copy(deep=True)
             memo[item_id] = clone
-            for name, unwrapped in field_values.items():
+            for name, unwrapped in changed_fields.items():
                 setattr(clone, name, unwrapped)
             return clone, True
 
