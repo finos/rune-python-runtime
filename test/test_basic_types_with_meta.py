@@ -1,3 +1,6 @@
+# Copyright (c) 2023-2026 CLOUDRISK Limited and FT Advisory LLC
+# SPDX-License-Identifier: Apache-2.0
+
 '''test module for the annotated base rune types'''
 from datetime import date, time, datetime
 from enum import Enum
@@ -39,6 +42,14 @@ class AnnotatedDateModel(BaseDataClass):
                     DateWithMeta.serializer(),
                     DateWithMeta.validator(('@scheme',))
     ] = Field(..., description="Test date")
+
+
+class OptionalAnnotatedDateModel(BaseDataClass):
+    '''Optional date with the validator wrapping the nullable type.'''
+    date: Annotated[DateWithMeta | None,
+                    DateWithMeta.serializer(),
+                    DateWithMeta.validator(('@scheme',))
+    ] = Field(None, description="Optional test date", validate_default=True)
 
 
 class AnnotatedDateTimeModel(BaseDataClass):
@@ -225,6 +236,60 @@ def test_dump_annotated_date_date():
     model = AnnotatedDateModel(date=DateWithMeta(date(2024, 10, 10)))
     json_str = model.model_dump_json(exclude_unset=True)
     assert json_str == '{"date":{"@data":"2024-10-10"}}'
+
+
+@pytest.mark.parametrize('data', [{}, {'date': None}])
+def test_create_optional_annotated_date_with_none(data):
+    '''Accept omitted and explicit None values during construction.'''
+    model = OptionalAnnotatedDateModel(**data)
+    assert model.date is None
+
+
+@pytest.mark.parametrize('data', [{}, {'date': None}])
+@pytest.mark.parametrize('method', ['model_validate', 'rune_deserialize'])
+def test_deserialize_optional_annotated_date_with_none(data, method):
+    '''Accept absent optional dates through the public dictionary APIs.'''
+    model = getattr(OptionalAnnotatedDateModel, method)(data)
+    assert model.date is None
+
+
+@pytest.mark.parametrize('json_str', ['{}', '{"date":null}'])
+def test_load_optional_annotated_date_with_none(json_str):
+    '''Accept omitted dates and JSON null with default validation enabled.'''
+    model = OptionalAnnotatedDateModel.model_validate_json(json_str)
+    assert model.date is None
+
+
+@pytest.mark.parametrize('value', [
+    '2024-10-10',
+    {'@data': '2024-10-10', '@scheme': 'http://fpml.org'},
+])
+def test_create_optional_annotated_date_with_value(value):
+    '''Continue to convert date values and retain their metadata.'''
+    model = OptionalAnnotatedDateModel(date=value)
+    assert isinstance(model.date, DateWithMeta)
+    assert model.date == date(2024, 10, 10)
+    expected_scheme = 'http://fpml.org' if isinstance(value, dict) else None
+    assert model.date.get_meta('scheme') == expected_scheme
+
+
+def test_create_required_annotated_date_with_none():
+    '''Reject None for a required date with a Pydantic validation error.'''
+    with pytest.raises(ValidationError):
+        AnnotatedDateModel(date=None)
+
+
+@pytest.mark.parametrize('method', ['model_validate', 'rune_deserialize'])
+def test_deserialize_required_annotated_date_with_none(method):
+    '''Dictionary APIs must still reject None for a required date.'''
+    with pytest.raises(ValidationError):
+        getattr(AnnotatedDateModel, method)({'date': None})
+
+
+def test_load_required_annotated_date_with_none():
+    '''JSON null must still be invalid for a required date.'''
+    with pytest.raises(ValidationError):
+        AnnotatedDateModel.model_validate_json('{"date":null}')
 
 
 def test_annotated_date_fail():

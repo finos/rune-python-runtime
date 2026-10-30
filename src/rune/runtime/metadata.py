@@ -1,4 +1,8 @@
+# Copyright (c) 2023-2026 CLOUDRISK Limited and FT Advisory LLC
+# SPDX-License-Identifier: Apache-2.0
+
 '''Classes representing annotated basic Rune types'''
+import copy
 import datetime
 import importlib
 import uuid
@@ -8,7 +12,8 @@ from enum import Enum
 from functools import lru_cache, partial
 from typing import Any, Never, Self, get_args
 
-from pydantic import PlainSerializer, PlainValidator, WrapSerializer, WrapValidator
+from pydantic import (PlainSerializer, PlainValidator,
+                      ValidatorFunctionWrapHandler, WrapSerializer, WrapValidator)
 from pydantic_core import PydanticCustomError
 
 # from rune.runtime.object_registry import get_object
@@ -438,6 +443,7 @@ class ComplexTypeMetaDataMixin(BaseMetaDataMixin):
     @classmethod
     def deserialize(cls, obj, allowed_meta: set[str]):
         '''method used as pydantic `validator`'''
+        obj = _unwrap_cow_proxy(obj)
         if isinstance(obj, list):
             return [cls.deserialize(item, allowed_meta) for item in obj]
 
@@ -454,20 +460,19 @@ class ComplexTypeMetaDataMixin(BaseMetaDataMixin):
                                       'Expected either {my_type} or dict but '
                                       'got {type}.',
                                       {'type': type(obj), 'my_type': cls})
-        metadata = {k: obj[k] for k in obj if k.startswith('@')}
+        metadata, fields = {}, {}
+        for k, v in obj.items():
+            (metadata if k.startswith('@') else fields)[k] = v
 
         # References deserialization treatment
         if aux := cls._create_unresolved_ref(metadata):
             return aux
 
         # Model creation
-        for k in metadata:
-            obj.pop(k)
-
         rune_cls = cls._type_to_cls(metadata)
         if rune_cls != cls and not issubclass(rune_cls, cls):
             raise ValueError(f'{rune_cls} has to be a child class of {cls}!')
-        model = rune_cls.model_validate(obj)  # type: ignore
+        model = rune_cls.model_validate(fields)  # type: ignore
         model.__dict__[META_CONTAINER] = metadata
         if cls.meta_checks_enabled():
             model._init_meta(allowed_meta)  # pylint: disable=protected-access
@@ -484,11 +489,16 @@ class ComplexTypeMetaDataMixin(BaseMetaDataMixin):
 
     @classmethod
     @lru_cache
-    def validator(cls, allowed_meta: tuple[str] | tuple[Never, ...] = ()):
-        '''default validator for the specific class'''
+    def validator(cls, allowed_meta: tuple[str, ...] = ()) -> WrapValidator:
+        '''Let the field schema validate None and deserialize Rune values.'''
         allowed = set(allowed_meta)
-        return PlainValidator(partial(cls.deserialize, allowed_meta=allowed),
-                              json_schema_input_type=dict)
+
+        def validate(obj: Any, handler: ValidatorFunctionWrapHandler) -> Any:
+            if obj is None:
+                return handler(None)
+            return cls.deserialize(obj, allowed)
+
+        return WrapValidator(validate, json_schema_input_type=dict)
 
 
 class BasicTypeMetaDataMixin(BaseMetaDataMixin):
@@ -514,6 +524,9 @@ class BasicTypeMetaDataMixin(BaseMetaDataMixin):
     @classmethod
     def deserialize(cls, obj, handler, base_types, allowed_meta: set[str]):
         '''method used as pydantic `validator`'''
+        obj = _unwrap_cow_proxy(obj)
+        if obj is None:
+            return handler(None)
         if isinstance(obj, list):
             identity = lambda x: x
             processed = [cls.deserialize(item, identity, base_types, allowed_meta) for item in obj]
@@ -524,9 +537,10 @@ class BasicTypeMetaDataMixin(BaseMetaDataMixin):
         elif isinstance(obj, dict):
             if ref := cls._create_unresolved_ref(obj):
                 return ref
-            data = obj.pop('@data')
-            model = cls(data, **obj)  # type: ignore
-            model._register_keys(obj)
+            data = obj['@data']
+            metadata = {k: v for k, v in obj.items() if k != '@data'}
+            model = cls(data, **metadata)  # type: ignore
+            model._register_keys(metadata)
         if cls.meta_checks_enabled():
             model._init_meta(allowed_meta)  # pylint: disable=protected-access
         return handler(model)
@@ -549,7 +563,24 @@ class BasicTypeMetaDataMixin(BaseMetaDataMixin):
                              json_schema_input_type=cls._JSON_OUTPUT)
 
 
-class DateWithMeta(datetime.date, BasicTypeMetaDataMixin):
+class _DateTimeCopyMixin:
+    '''Copy temporal values without using their bytes-based pickle protocol.'''
+
+    def __copy__(self) -> Self:
+        '''Copy the value and share its attribute values.'''
+        clone = type(self)(self)  # type: ignore
+        clone.__dict__.update(self.__dict__)
+        return clone
+
+    def __deepcopy__(self, memo: dict[int, Any]) -> Self:
+        '''Deep-copy attributes while preserving cycles and shared values.'''
+        clone = type(self)(self)  # type: ignore
+        memo[id(self)] = clone
+        clone.__dict__.update(copy.deepcopy(self.__dict__, memo))
+        return clone
+
+
+class DateWithMeta(datetime.date, _DateTimeCopyMixin, BasicTypeMetaDataMixin):
     '''date with metadata'''
     _INPUT_TYPES = (datetime.date, str)
 
@@ -563,7 +594,7 @@ class DateWithMeta(datetime.date, BasicTypeMetaDataMixin):
         return obj
 
 
-class TimeWithMeta(datetime.time, BasicTypeMetaDataMixin):
+class TimeWithMeta(datetime.time, _DateTimeCopyMixin, BasicTypeMetaDataMixin):
     '''annotated time'''
     _INPUT_TYPES = (datetime.time, str)
 
@@ -582,7 +613,7 @@ class TimeWithMeta(datetime.time, BasicTypeMetaDataMixin):
         return obj
 
 
-class DateTimeWithMeta(datetime.datetime, BasicTypeMetaDataMixin):
+class DateTimeWithMeta(datetime.datetime, _DateTimeCopyMixin, BasicTypeMetaDataMixin):
     '''annotated datetime'''
     _INPUT_TYPES = (datetime.datetime, str)
 
@@ -695,6 +726,7 @@ class EnumWithMetaMixin:
     @classmethod
     def deserialize(cls, obj, allowed_meta: set[str]):
         '''method used as pydantic `validator`'''
+        obj = _unwrap_cow_proxy(obj)
         if isinstance(obj, list):
             return [cls.deserialize(item, allowed_meta) for item in obj]
         model = obj
@@ -708,10 +740,11 @@ class EnumWithMetaMixin:
             # pylint: disable=protected-access
             if ref := _EnumWrapper._create_unresolved_ref(obj):
                 return ref
-            data = obj.pop('@data')
+            data = obj['@data']
+            metadata = {k: v for k, v in obj.items() if k != '@data'}
             model = _EnumWrapper(cls(data))  # type: ignore
-            model.set_meta(check_allowed=False, **obj)
-            model._register_keys(obj)  # pylint: disable=protected-access
+            model.set_meta(check_allowed=False, **metadata)
+            model._register_keys(metadata)  # pylint: disable=protected-access
         if _EnumWrapper.meta_checks_enabled():
             model._init_meta(allowed_meta)  # pylint: disable=protected-access
         return model
