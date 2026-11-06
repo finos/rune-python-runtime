@@ -122,6 +122,22 @@ def test_complex_list_rejects_none_elements(load_model):
         load_model(OptionalLoanBook, {'loans': [None]})
 
 
+def test_optional_complex_list_serializes_values_and_none():
+    '''List fields wrapped with ComplexTypeMetaDataMixin.serializer serialize cleanly.'''
+    empty_book = OptionalLoanBook(loans=None)
+    assert empty_book.model_dump() == {'loans': None}
+
+    populated_book = OptionalLoanBook(loans=[
+        {'currency': 'EUR', 'amount': '100'},
+        {'currency': 'USD', 'amount': '200'},
+    ])
+    dumped = json.loads(populated_book.rune_serialize())
+    assert dumped['loans'] == [
+        {'currency': 'EUR', 'amount': '100'},
+        {'currency': 'USD', 'amount': '200'},
+    ]
+
+
 def test_complex_type_preserves_subtype_identity():
     '''The adapter must not revalidate and replace existing subtype objects.'''
     class DetailedCashFlow(CashFlow):

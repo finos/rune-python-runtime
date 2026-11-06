@@ -108,6 +108,16 @@ class AnnotatedEnumModel(BaseDataClass):
                           ('@scheme', ))] = Field(..., description='')
 
 
+class OptionalAnnotatedEnumModel(BaseDataClass):
+    '''Optional enum with the validator wrapping the nullable type.'''
+    enum_t: Annotated[EnumType | None,
+                      EnumType.serializer(),
+                      EnumType.validator(
+                          ('@scheme', ))] = Field(None,
+                                                  description='',
+                                                  validate_default=True)
+
+
 def test_dump_annotated_string_simple():
     '''test the annotated string'''
     model = AnnotatedStringModel(currency='EUR')
@@ -430,5 +440,48 @@ def test_annotated_enum_assignment():
     model.enum_t = EnumType.C
     assert model.enum_t != EnumType.B
     assert isinstance(model.enum_t, _EnumWrapper)
+
+
+@pytest.mark.parametrize('data', [{}, {'enum_t': None}])
+def test_create_optional_annotated_enum_with_none(data):
+    '''Accept omitted and explicit None values for optional annotated enums.'''
+    model = OptionalAnnotatedEnumModel(**data)
+    assert model.enum_t is None
+    assert model.model_dump() == {'enum_t': None}
+
+
+@pytest.mark.parametrize('data', [{}, {'enum_t': None}])
+@pytest.mark.parametrize('method', ['model_validate', 'rune_deserialize'])
+def test_deserialize_optional_annotated_enum_with_none(data, method):
+    '''Accept absent or None optional enums through dictionary APIs.'''
+    model = getattr(OptionalAnnotatedEnumModel, method)(data)
+    assert model.enum_t is None
+
+
+@pytest.mark.parametrize('json_str', ['{}', '{"enum_t":null}'])
+def test_load_optional_annotated_enum_with_none(json_str):
+    '''Accept omitted enums and JSON null with default validation enabled.'''
+    model = OptionalAnnotatedEnumModel.model_validate_json(json_str)
+    assert model.enum_t is None
+
+
+@pytest.mark.parametrize('value', [
+    'A',
+    EnumType.A,
+    {'@data': 'A', '@scheme': 'http://fpml.org'},
+])
+def test_create_optional_annotated_enum_with_value(value):
+    '''Continue to wrap enum values and retain their metadata.'''
+    model = OptionalAnnotatedEnumModel(enum_t=value)
+    assert isinstance(model.enum_t, _EnumWrapper)
+    assert model.enum_t == EnumType.A
+    expected_scheme = 'http://fpml.org' if isinstance(value, dict) else None
+    assert model.enum_t.get_meta('@scheme') == expected_scheme
+
+
+def test_create_required_annotated_enum_with_none():
+    '''Reject None for a required annotated enum with a ValidationError.'''
+    with pytest.raises(ValidationError):
+        AnnotatedEnumModel(enum_t=None)
 
 # EOF

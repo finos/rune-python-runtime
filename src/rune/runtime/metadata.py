@@ -12,7 +12,7 @@ from enum import Enum
 from functools import lru_cache, partial
 from typing import Any, Never, Self, get_args
 
-from pydantic import (PlainSerializer, PlainValidator,
+from pydantic import (PlainSerializer,
                       ValidatorFunctionWrapHandler, WrapSerializer, WrapValidator)
 from pydantic_core import PydanticCustomError
 
@@ -430,8 +430,12 @@ class ComplexTypeMetaDataMixin(BaseMetaDataMixin):
         return cls  # support for legacy json
 
     @classmethod
-    def serialise(cls, obj) -> dict:
+    def serialise(cls, obj) -> dict | list | None:
         '''used as serialisation method with pydantic'''
+        if obj is None:
+            return None
+        if isinstance(obj, list):
+            return [cls.serialise(item) for item in obj]
         res = obj.serialise_meta()
         res |= obj.model_dump(exclude_unset=True, exclude_defaults=True)
         if cls != obj.__class__:
@@ -485,7 +489,7 @@ class ComplexTypeMetaDataMixin(BaseMetaDataMixin):
     @lru_cache
     def serializer(cls):
         '''should return the validator for the specific class'''
-        return PlainSerializer(cls.serialise, return_type=dict)
+        return PlainSerializer(cls.serialise, return_type=dict | list | None)
 
     @classmethod
     @lru_cache
@@ -515,8 +519,12 @@ class BasicTypeMetaDataMixin(BaseMetaDataMixin):
                             f' however the value is of type {type(value)}')
 
     @classmethod
-    def serialise(cls, obj, base_type) -> dict:
+    def serialise(cls, obj, base_type) -> dict | list | None:
         '''used as serialisation method with pydantic'''
+        if obj is None:
+            return None
+        if isinstance(obj, list):
+            return [cls.serialise(item, base_type) for item in obj]
         res = obj.serialise_meta()
         res['@data'] = base_type(obj)
         return res
@@ -550,7 +558,7 @@ class BasicTypeMetaDataMixin(BaseMetaDataMixin):
     def serializer(cls):
         '''should return the validator for the specific class'''
         ser_fn = partial(cls.serialise, base_type=cls._OUTPUT_TYPE)
-        return PlainSerializer(ser_fn, return_type=dict)
+        return PlainSerializer(ser_fn, return_type=dict | list | None)
 
     @classmethod
     @lru_cache
@@ -717,8 +725,15 @@ class _EnumWrapper(BaseMetaDataMixin):
 class EnumWithMetaMixin:
     '''holds the metadata associated with a Rune Enum'''
     @classmethod
-    def serialise(cls, obj, handler, info) -> dict:
+    def serialise(cls, obj, handler, info) -> dict | list | None:
         '''used as serialisation method with pydantic'''
+        if obj is None:
+            return None
+        if isinstance(obj, list):
+            return [
+                item.serialise_meta() | {'@data': item.value}
+                for item in obj
+            ]
         res = obj.serialise_meta()
         res['@data'] = handler(obj.enum_instance, info)
         return res
@@ -753,14 +768,19 @@ class EnumWithMetaMixin:
     @lru_cache
     def serializer(cls):
         '''should return the validator for the specific class'''
-        return WrapSerializer(cls.serialise, return_type=dict)
+        return WrapSerializer(cls.serialise, return_type=dict | list | None)
 
     @classmethod
     @lru_cache
     def validator(cls, allowed_meta: tuple[str] | tuple[Never, ...] = ()):
         '''default validator for the specific class'''
         allowed = set(allowed_meta)
-        return PlainValidator(partial(cls.deserialize, allowed_meta=allowed),
-                              json_schema_input_type=str | dict)
+
+        def validate(obj: Any, handler: ValidatorFunctionWrapHandler) -> Any:
+            if obj is None:
+                return handler(None)
+            return cls.deserialize(obj, allowed)
+
+        return WrapValidator(validate, json_schema_input_type=str | dict)
 
 # EOF
