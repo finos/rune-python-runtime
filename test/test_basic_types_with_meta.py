@@ -155,15 +155,15 @@ def test_dump_annotated_number_simple():
     '''test the annotated string'''
     model = AnnotatedNumberModel(amount=10)
     json_str = model.model_dump_json(exclude_unset=True)
-    assert json_str == '{"amount":{"@data":"10"}}', 'explicit int failed'
+    assert json_str == '{"amount":{"@data":10}}', 'explicit int failed'
 
     model = AnnotatedNumberModel(amount="10.344")
     json_str = model.model_dump_json(exclude_unset=True)
-    assert json_str == '{"amount":{"@data":"10.344"}}', 'explicit string failed'
+    assert json_str == '{"amount":{"@data":10.344}}', 'explicit string failed'
 
     model = AnnotatedNumberModel(amount=NumberWithMeta(10))
     json_str = model.model_dump_json(exclude_unset=True)
-    assert json_str == '{"amount":{"@data":"10"}}', 'annotated number failed'
+    assert json_str == '{"amount":{"@data":10}}', 'annotated number failed'
 
 
 def test_dump_annotated_number_scheme():
@@ -171,7 +171,7 @@ def test_dump_annotated_number_scheme():
     model = AnnotatedNumberModel(
         amount=NumberWithMeta(10, scheme='http://fpml.org'))
     json_str = model.model_dump_json(exclude_unset=True)
-    assert json_str == '{"amount":{"@scheme":"http://fpml.org","@data":"10"}}'
+    assert json_str == '{"amount":{"@scheme":"http://fpml.org","@data":10}}'
 
 
 def test_load_annotated_number():

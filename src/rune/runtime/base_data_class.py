@@ -1,9 +1,12 @@
 '''Base class for all Rune type classes'''
 from collections.abc import MutableSequence
+from decimal import Decimal
 import logging
 import importlib
 import copy
 import json
+import re
+import uuid
 from typing import get_args, get_origin, Any, Literal
 from typing_extensions import Self
 from pydantic import (BaseModel, ValidationError, ConfigDict, model_serializer,
@@ -13,7 +16,8 @@ from rune.runtime.conditions import ConditionViolationError
 from rune.runtime.conditions import get_conditions
 from rune.runtime.metadata import (REFS_CONTAINER, ComplexTypeMetaDataMixin, Reference,
                                    UnresolvedReference, BaseMetaDataMixin,
-                                   _EnumWrapper, RUNE_OBJ_MAPS)
+                                   _EnumWrapper, RUNE_OBJ_MAPS,
+                                   DECIMAL_JSON_SENTINEL, tag_decimal_for_json)
 
 ROOT_CONTAINER = '__rune_root_metadata'
 
@@ -109,10 +113,34 @@ class BaseDataClass(BaseModel, ComplexTypeMetaDataMixin):
         '''should replace objects with refs while serializing'''
         res = serializer(self)
         refs = self._get_rune_refs_container()
+        if sentinel := DECIMAL_JSON_SENTINEL.get():
+            for prop_nm, ser_val in list(res.items()):
+                if prop_nm not in refs and prop_nm in self.__dict__:
+                    res[prop_nm] = tag_decimal_for_json(
+                        self.__dict__[prop_nm], ser_val, sentinel
+                    )
         for property_nm, (key, ref_type) in refs.items():
             res[property_nm] = {ref_type.rune_ref_tag: key}
         res = self.__dict__.get(ROOT_CONTAINER, {}) | res
         return res
+
+    def model_dump_json(self, *args: Any, **kwargs: Any) -> str:
+        '''Serialize model to JSON, writing Decimal values as exact JSON numbers.'''
+        if DECIMAL_JSON_SENTINEL.get() is not None:
+            return super().model_dump_json(*args, **kwargs)
+        sentinel = f'__rune_dec_{uuid.uuid4().hex}__'
+        token = DECIMAL_JSON_SENTINEL.set(sentinel)
+        try:
+            raw_json = super().model_dump_json(*args, **kwargs)
+        finally:
+            DECIMAL_JSON_SENTINEL.reset(token)
+        if sentinel not in raw_json:
+            return raw_json
+        return re.sub(
+            rf'"{re.escape(sentinel)}([+-]?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?){re.escape(sentinel)}"',
+            r'\1',
+            raw_json,
+        )
 
     @model_validator(mode='wrap')
     @classmethod
@@ -289,7 +317,7 @@ class BaseDataClass(BaseModel, ComplexTypeMetaDataMixin):
             `BaseModel:` The Rune model.
         '''
         if isinstance(rune_data, str):
-            rune_dict = json.loads(rune_data)
+            rune_dict = json.loads(rune_data, parse_float=Decimal)
             # NOTE: json.loads will not create the right atomic types
             # (e.g. date, datetime, time etc) and the strict model validate
             # will not attempt to convert them.

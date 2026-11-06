@@ -31,6 +31,7 @@ type Root:
 '''
 import datetime
 from decimal import Decimal
+import json
 from typing import Optional, Annotated
 from pydantic import Field
 from rune.runtime.base_data_class import BaseDataClass
@@ -105,6 +106,10 @@ def test_basic_types_single():
     '''
     model = Root.model_validate_json(json_str)
     model.validate_model()
+    dumped = json.loads(model.rune_serialize())
+    assert dumped['basicSingle']['numberType'] == 123.456
+    assert dumped['basicSingle']['parameterisedNumberType'] == 123.99
+    assert isinstance(dumped['basicSingle']['numberType'], float)
 
 
 def test_basic_types_list():
@@ -123,5 +128,31 @@ def test_basic_types_list():
     '''
     model = Root.model_validate_json(json_str)
     model.validate_model()
+    dumped = json.loads(model.rune_serialize())
+    assert dumped['basicList']['numberTypes'] == [123.456, 789, 345.123]
+    assert dumped['basicList']['parameterisedNumberTypes'] == [123.99, 456, 99.12]
+
+
+class PlainNumber(BaseDataClass):
+    '''Simple model for testing exact Decimal JSON number serialization.'''
+    amount: Optional[Decimal] = Field(None, description='')
+
+
+def test_plain_number_writes_exact_json_numbers():
+    '''Rune number values must be written as exact JSON numbers, not strings.'''
+    for raw_text, expected in [('5', 5), ('10.5', 10.5), ('0.0045', 0.0045)]:
+        model = PlainNumber(amount=Decimal(raw_text))
+        serialized = model.rune_serialize(validate_model=False)
+        assert f'"amount":{raw_text}' in serialized
+        parsed = json.loads(serialized)
+        assert parsed['amount'] == expected
+        assert not isinstance(parsed['amount'], str)
+
+    high_prec = '1234567890123456.78'
+    model = PlainNumber(amount=Decimal(high_prec))
+    serialized = model.rune_serialize(validate_model=False)
+    assert f'"amount":{high_prec}' in serialized
+    round_tripped = PlainNumber.rune_deserialize(serialized, validate_model=False)
+    assert round_tripped.amount == Decimal(high_prec)
 
 # EOF

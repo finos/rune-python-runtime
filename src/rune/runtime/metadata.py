@@ -7,6 +7,7 @@ import datetime
 import importlib
 import uuid
 from collections.abc import Iterable
+from contextvars import ContextVar
 from decimal import Decimal
 from enum import Enum
 from functools import lru_cache, partial
@@ -23,6 +24,30 @@ META_CONTAINER = '__rune_metadata'
 REFS_CONTAINER = '__rune_references'
 PARENT_PROP = '__rune_parent'
 RUNE_OBJ_MAPS = '__rune_object_maps'
+DECIMAL_JSON_SENTINEL: ContextVar[str | None] = ContextVar(
+    'DECIMAL_JSON_SENTINEL', default=None
+)
+
+
+def tag_decimal_for_json(orig_val: Any, ser_val: Any, sentinel: str) -> Any:
+    '''Wrap finite Decimal values with the active JSON sentinel token.'''
+    orig_val = _unwrap_cow_proxy(orig_val)
+    if isinstance(orig_val, Decimal) and orig_val.is_finite():
+        if isinstance(ser_val, (str, Decimal)):
+            return f'{sentinel}{orig_val}{sentinel}'
+    if isinstance(orig_val, (list, tuple)) and isinstance(ser_val, list):
+        if len(orig_val) == len(ser_val):
+            return [
+                tag_decimal_for_json(o_item, s_item, sentinel)
+                for o_item, s_item in zip(orig_val, ser_val)
+            ]
+    if isinstance(orig_val, dict) and isinstance(ser_val, dict):
+        return {
+            k: tag_decimal_for_json(orig_val[k], v, sentinel)
+            if k in orig_val else v
+            for k, v in ser_val.items()
+        }
+    return ser_val
 
 
 def _replaceable(prop):
@@ -418,6 +443,8 @@ class ComplexTypeMetaDataMixin(BaseMetaDataMixin):
                      metadata:dict[str, Any],
                      namespace_prefix: str | None = None):
         if rune_type:= metadata.pop('@type', None):
+            if cls.__name__ != 'BaseDataClass' and rune_type == cls._fqrtn():
+                return cls
             rune_class_name = rune_type.rsplit('.', maxsplit=1)[-1]
             import_path = rune_type
             prefix = namespace_prefix
@@ -518,7 +545,13 @@ class BasicTypeMetaDataMixin(BaseMetaDataMixin):
     def serialise(cls, obj, base_type) -> dict:
         '''used as serialisation method with pydantic'''
         res = obj.serialise_meta()
-        res['@data'] = base_type(obj)
+        val = base_type(obj)
+        if (isinstance(val, Decimal)
+                and val.is_finite()
+                and (sentinel := DECIMAL_JSON_SENTINEL.get())):
+            res['@data'] = f'{sentinel}{val}{sentinel}'
+        else:
+            res['@data'] = val
         return res
 
     @classmethod
@@ -665,8 +698,8 @@ class NumberWithMeta(Decimal, BasicTypeMetaDataMixin):
     _JSON_OUTPUT = float | int | str | dict
 
     def __new__(cls, value, **kwds):
-        # NOTE: it could be necessary to convert the value to str if it is a
-        # float
+        if isinstance(value, float):
+            value = str(value)
         obj = Decimal.__new__(cls, value)
         obj.set_meta(check_allowed=False, **kwds)
         return obj
