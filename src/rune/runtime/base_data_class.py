@@ -109,6 +109,18 @@ class BaseDataClass(BaseModel, ComplexTypeMetaDataMixin):
         '''should replace objects with refs while serializing'''
         res = serializer(self)
         refs = self._get_rune_refs_container()
+        model_fields = type(self).__pydantic_fields__
+        for prop_nm, ser_val in list(res.items()):
+            if prop_nm in refs or prop_nm not in self.__dict__:
+                continue
+            field_info = model_fields.get(prop_nm)
+            if field_info is None:
+                continue
+            declared_cls = _get_declared_model_type(field_info.annotation)
+            if declared_cls is not None:
+                res[prop_nm] = _serialize_polymorphic_value(
+                    self.__dict__[prop_nm], ser_val, declared_cls, info
+                )
         for property_nm, (key, ref_type) in refs.items():
             res[property_nm] = {ref_type.rune_ref_tag: key}
         res = self.__dict__.get(ROOT_CONTAINER, {}) | res
@@ -119,10 +131,23 @@ class BaseDataClass(BaseModel, ComplexTypeMetaDataMixin):
     def _deserialize_refs(cls, data: Any,
                           handler: ModelWrapValidatorHandler[Self]) -> Self:
         '''should resolve refs after creation'''
+        if isinstance(data, cls) and type(data) is not cls:
+            type(data).model_validate(data)
+            return data
         if isinstance(data, dict):
             metadata = {k: v for k, v in data.items() if k.startswith('@')}
             if aux := cls._create_unresolved_ref(metadata):
                 return aux
+            if '@type' in metadata:
+                data_copy = dict(data)
+                type_meta = {'@type': data_copy.pop('@type')}
+                rune_cls = cls._type_to_cls(type_meta)
+                if rune_cls != cls:
+                    if not issubclass(rune_cls, cls):
+                        raise ValueError(
+                            f'{rune_cls} has to be a child class of {cls}!'
+                        )
+                    return rune_cls.model_validate(data_copy)
         obj = handler(data)
         obj._init_rune_parent()  # pylint: disable=protected-access
         if isinstance(data, dict):
@@ -432,6 +457,55 @@ class BaseDataClass(BaseModel, ComplexTypeMetaDataMixin):
         # pylint: disable=bare-except
         except:  # noqa
             return '0.0.0'
+
+
+def _get_declared_model_type(annotation: Any) -> type | None:
+    '''Extract the declared BaseDataClass type from a field annotation.'''
+    if isinstance(annotation, type) and issubclass(annotation, BaseDataClass):
+        return annotation
+    for arg in get_args(annotation):
+        if arg is type(None):
+            continue
+        if found := _get_declared_model_type(arg):
+            return found
+    return None
+
+
+def _serialize_polymorphic_value(
+    orig_val: Any,
+    ser_val: Any,
+    declared_cls: type,
+    info: Any,
+) -> Any:
+    '''Serialize subtype values using their runtime schema and include @type.'''
+    unwrap = getattr(orig_val, '_unwrap', None)
+    if callable(unwrap):
+        orig_val = unwrap()
+    if (isinstance(orig_val, BaseDataClass)
+            and type(orig_val) is not declared_cls
+            and issubclass(type(orig_val), declared_cls)):
+        dumped = orig_val.model_dump(
+            mode=info.mode,
+            by_alias=info.by_alias,
+            exclude_unset=info.exclude_unset,
+            exclude_defaults=info.exclude_defaults,
+            exclude_none=info.exclude_none,
+            round_trip=info.round_trip,
+            serialize_as_any=info.serialize_as_any,
+        )
+        meta = (
+            {k: v for k, v in ser_val.items() if k.startswith('@')}
+            if isinstance(ser_val, dict) else {}
+        )
+        return {'@type': orig_val._fqrtn()} | meta | dumped
+    if (isinstance(orig_val, (list, tuple))
+            and isinstance(ser_val, list)
+            and len(orig_val) == len(ser_val)):
+        return [
+            _serialize_polymorphic_value(o_item, s_item, declared_cls, info)
+            for o_item, s_item in zip(orig_val, ser_val)
+        ]
+    return ser_val
 
 
 def _validate_conditions_recursively(obj, raise_exc=True):
