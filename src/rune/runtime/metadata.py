@@ -157,14 +157,17 @@ class BaseMetaDataMixin:
     @classmethod
     def _fqrtn(cls):
         '''returns the fully qualified'''
-        if explicit_fqrtn := getattr(cls, '_FQRTN', None):
+        if explicit_fqrtn := cls.__dict__.get('_FQRTN'):
             return explicit_fqrtn
 
         module_name = cls.__module__
         if prefix := cls._get_rune_namespace_prefix():
             prefixed_module = prefix + '.'
             if module_name.startswith(prefixed_module):
-                return module_name[len(prefixed_module):]
+                module_name = module_name[len(prefixed_module):]
+        if (module_name != cls.__name__
+                and not module_name.endswith('.' + cls.__name__)):
+            return f'{module_name}.{cls.__name__}'
         return module_name
 
     @classmethod
@@ -414,10 +417,21 @@ class BaseMetaDataMixin:
 class ComplexTypeMetaDataMixin(BaseMetaDataMixin):
     '''metadata support for complex types'''
     @classmethod
+    def _find_subclass_by_name(cls, class_name: str):
+        for sub in cls.__subclasses__():
+            if sub.__name__ == class_name:
+                return sub
+            if found := sub._find_subclass_by_name(class_name):
+                return found
+        return None
+
+    @classmethod
     def _type_to_cls(cls,
                      metadata:dict[str, Any],
                      namespace_prefix: str | None = None):
         if rune_type:= metadata.pop('@type', None):
+            if cls.__name__ != 'BaseDataClass' and rune_type == cls._fqrtn():
+                return cls
             rune_class_name = rune_type.rsplit('.', maxsplit=1)[-1]
             import_path = rune_type
             prefix = namespace_prefix
@@ -425,7 +439,19 @@ class ComplexTypeMetaDataMixin(BaseMetaDataMixin):
                 prefix = cls._get_rune_namespace_prefix()
             if prefix and not rune_type.startswith(prefix + '.'):
                 import_path = prefix + '.' + rune_type
-            rune_module = importlib.import_module(import_path)
+            try:
+                rune_module = importlib.import_module(import_path)
+            except ModuleNotFoundError:
+                if '.' not in import_path:
+                    if found := cls._find_subclass_by_name(rune_class_name):
+                        return found
+                    raise
+                parent_path = import_path.rsplit('.', maxsplit=1)[0]
+                rune_module = importlib.import_module(parent_path)
+            if hasattr(rune_module, rune_class_name):
+                return getattr(rune_module, rune_class_name)
+            if found := cls._find_subclass_by_name(rune_class_name):
+                return found
             return getattr(rune_module, rune_class_name)
         return cls  # support for legacy json
 
