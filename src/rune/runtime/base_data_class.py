@@ -249,7 +249,7 @@ class BaseDataClass(BaseModel, ComplexTypeMetaDataMixin):
                                         warnings=warnings,
                                         serialize_as_any=serialize_as_any)
         finally:
-            self.__dict__.pop(ROOT_CONTAINER)
+            self.__dict__.pop(ROOT_CONTAINER, None)
 
     @classmethod
     def rune_deserialize(cls,

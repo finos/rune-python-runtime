@@ -15,7 +15,9 @@ call instead of calling it per-element.  The existing code then does:
 
 These tests call deserialize directly so they are Pydantic-version-independent.
 '''
+from typing import Annotated
 from enum import Enum
+import json
 
 import pytest
 
@@ -161,5 +163,43 @@ def test_complex_deserialize_scalar_dict_still_works():
     result = SimpleItem.deserialize({'value': 'z'}, allowed_meta=set())
     assert isinstance(result, SimpleItem)
     assert result.value == 'z'
+
+
+class ListMetaContainer(BaseDataClass):
+    '''Model with outer-Annotated list fields for complex, basic, and enum types.'''
+    items: Annotated[
+        list[SimpleItem],
+        SimpleItem.serializer(),
+        SimpleItem.validator(('@key',)),
+    ] = Field(default_factory=list)
+    tags: Annotated[
+        list[StrWithMeta],
+        StrWithMeta.serializer(),
+        StrWithMeta.validator(('@scheme',)),
+    ] = Field(default_factory=list)
+    colors: Annotated[
+        list[Color],
+        Color.serializer(),
+        Color.validator(('@scheme',)),
+    ] = Field(default_factory=list)
+
+
+def test_list_fields_with_outer_metadata_round_trip_serialize():
+    '''Outer-Annotated list fields must serialize and round-trip without error.'''
+    container = ListMetaContainer(
+        items=[{'@key': 'k1', 'value': 'a'}, {'value': 'b'}],
+        tags=[{'@data': 't1', '@scheme': 's1'}, 't2'],
+        colors=[{'@data': 'RED', '@scheme': 'rgb'}, 'BLUE'],
+    )
+    serialized = json.loads(container.rune_serialize())
+    assert serialized['items'] == [{'@key': 'k1', 'value': 'a'}, {'value': 'b'}]
+    assert serialized['tags'] == [
+        {'@data': 't1', '@scheme': 's1'},
+        {'@data': 't2'},
+    ]
+    assert serialized['colors'] == [
+        {'@data': 'RED', '@scheme': 'rgb'},
+        {'@data': 'BLUE'},
+    ]
 
 # EOF
