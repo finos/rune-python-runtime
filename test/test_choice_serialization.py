@@ -73,6 +73,12 @@ type Root:
     dateRef PaymentDate (0..1)
         [metadata reference]
     keyed Keyed (0..1)
+    withMetaHooked ChoiceWithMeta (0..1)
+    choiceRef ChoiceData (0..1)
+        [metadata address "pointsTo"=Root->located]
+
+withMetaHooked has the runtime's serializer and validator although it has no
+metadata, as every field of a class in the generated bundle does.
 '''
 import json
 from typing import Annotated, ClassVar, Optional
@@ -240,9 +246,16 @@ class Root(BaseDataClass):
     keyed: Annotated[Optional[Keyed], _Keyed.serializer(),
                      _Keyed.validator(KEYS)] = Field(None)
     holder: Optional[OneOfHolder] = Field(None)
+    withMetaHooked: Annotated[Optional[ChoiceWithMeta],
+                              ChoiceWithMeta.serializer(),
+                              ChoiceWithMeta.validator()] = Field(None)
+    choiceRef: Annotated[Optional[ChoiceData | BaseReference],
+                         _ChoiceData.serializer(),
+                         _ChoiceData.validator(('@ref:scoped', ))] = Field(None)
     _KEY_REF_CONSTRAINTS = {
         'located': {'@key:scoped'},
-        'dateRef': {'@ref', '@ref:external'}
+        'dateRef': {'@ref', '@ref:external'},
+        'choiceRef': {'@ref:scoped'}
     }
 
 
@@ -313,6 +326,28 @@ def test_round_trip_option_is_a_reference():
     }
     model = Root.rune_deserialize(data, validate_model=False)
     assert _written(model, 'withMeta') == data['withMeta']
+
+
+def test_round_trip_option_is_a_reference_on_field_with_hooks():
+    '''a reference beside @type belongs to the option, not to the field'''
+    data = {
+        'withMetaHooked': {'@type': f'{NS}.Keyed', '@ref:external': 'k1'},
+        'keyed': {'@key:external': 'k1', 'fieldK': 'x'},
+    }
+    model = Root.rune_deserialize(data, validate_model=False)
+    assert model.withMetaHooked.Keyed is model.keyed
+    assert _written(model, 'withMetaHooked') == data['withMetaHooked']
+
+
+def test_reference_without_type_refers_to_the_whole_choice():
+    '''a reference with no @type is a reference to the choice itself'''
+    data = {
+        'located': {'@key:scoped': 'outer', '@data': A_JSON},
+        'choiceRef': {'@ref:scoped': 'outer'},
+    }
+    model = Root.rune_deserialize(data, validate_model=False)
+    assert model.choiceRef is model.located
+    assert _written(model, 'choiceRef') == data['choiceRef']
 
 
 def test_write_no_option_selected():

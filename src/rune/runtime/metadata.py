@@ -468,11 +468,14 @@ class ComplexTypeMetaDataMixin(BaseMetaDataMixin):
         for k, v in obj.items():
             (metadata if k.startswith('@') else fields)[k] = v
 
-        # References deserialization treatment
-        if aux := cls._create_unresolved_ref(metadata):
-            return aux
-
         # pylint: disable=protected-access
+        # References deserialization treatment. A reference beside `@type`
+        # belongs to the selected choice option, not to this attribute.
+        is_option_of_choice = cls._is_rune_choice() and '@type' in metadata
+        if not is_option_of_choice:
+            if aux := cls._create_unresolved_ref(metadata):
+                return aux
+
         if cls._is_rune_choice():
             if '@data' in metadata and '@type' not in metadata:
                 # Metadata of the attribute, beside the flattened choice
