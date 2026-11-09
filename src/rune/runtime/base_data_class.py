@@ -3,6 +3,7 @@ from collections.abc import MutableSequence
 import logging
 import importlib
 import copy
+import contextvars
 import json
 from typing import get_args, get_origin, Any, Literal
 from typing_extensions import Self
@@ -16,9 +17,27 @@ from rune.runtime.metadata import (REFS_CONTAINER, ComplexTypeMetaDataMixin, Ref
                                    _EnumWrapper, RUNE_OBJ_MAPS)
 
 ROOT_CONTAINER = '__rune_root_metadata'
+_CONSTRUCTING = contextvars.ContextVar('rune_constructing', default=False)
 
 
-class BaseDataClass(BaseModel, ComplexTypeMetaDataMixin):
+class _RuneModelMeta(type(BaseModel)):
+    '''Records that an object is being built directly in Python.
+
+    The validator of a choice can't otherwise tell `ChoiceBasic(string='x')`
+    from the JSON `{"string": "x"}`. This has to be done here: defining
+    `__init__` on the model would make pydantic build nested models through
+    it, so that JSON would look like direct construction as well.
+    '''
+    def __call__(cls, *args, **kwargs):
+        token = _CONSTRUCTING.set(True)
+        try:
+            return super().__call__(*args, **kwargs)
+        finally:
+            _CONSTRUCTING.reset(token)
+
+
+class BaseDataClass(BaseModel, ComplexTypeMetaDataMixin,
+                    metaclass=_RuneModelMeta):
     ''' A base class for all cdm generated classes. It is derived from
         `pydantic.BaseModel` which provides type checking at object creation
         for all cdm classes. It provides as well the `validate_model`,
@@ -111,8 +130,102 @@ class BaseDataClass(BaseModel, ComplexTypeMetaDataMixin):
         refs = self._get_rune_refs_container()
         for property_nm, (key, ref_type) in refs.items():
             res[property_nm] = {ref_type.rune_ref_tag: key}
+        if self._is_rune_choice():
+            res = self._flatten_choice(res)
         res = self.__dict__.get(ROOT_CONTAINER, {}) | res
         return res
+
+    @classmethod
+    def _is_rune_choice(cls) -> bool:
+        '''True for a class generated from a Rune `choice`.'''
+        return getattr(cls, '_RUNE_CHOICE', False)
+
+    @classmethod
+    def _option_class(cls, name: str):
+        '''The data class declared for a choice option. None if the option
+        is a basic type or an enum.'''
+        def find(tp):
+            if isinstance(tp, type):
+                return tp if issubclass(tp, BaseDataClass) else None
+            for arg in get_args(tp):
+                if found := find(arg):
+                    return found
+            return None
+        return find(cls.model_fields[name].annotation)
+
+    def _flatten_choice(self, res: dict) -> dict:
+        '''Rewrites a serialized choice in the Rune JSON format: `@type` names
+        the selected option and its fields sit directly on the choice.'''
+        selected = [name for name in type(self).model_fields
+                    if self.__dict__.get(name) is not None]
+        if not selected:
+            return {}
+        if len(selected) > 1:
+            raise ValueError(f'Multiple choice options selected for '
+                             f'{self._fqrtn()}: {selected}')
+        name = selected[0]
+        value = self.__dict__[name]
+        option = res[name]
+        declared = self._option_class(name)
+        if (isinstance(value, BaseDataClass) and declared is not None
+                and type(value) is not declared):
+            raise ValueError(f'Choice option {name} of {self._fqrtn()} holds '
+                             f'{type(value)}, but must be exactly {declared}')
+        option_cls = type(value) if isinstance(value, BaseDataClass) else declared
+        if option_cls is None:  # basic type or enum
+            if isinstance(option, dict) and '@data' in option:
+                return {'@type': name} | option
+            return {'@type': name, '@data': option}
+        # pylint: disable=protected-access
+        if option_cls._is_rune_choice():
+            # A nested choice is already flat, unless the option has metadata
+            return ({'@type': option_cls._fqrtn()} | option
+                    if '@data' in option else option)
+        return {'@type': option_cls._fqrtn()} | {
+            k: v for k, v in option.items() if k != '@type'}
+
+    @classmethod
+    def _choice_has_option(cls, rune_type: str) -> bool:
+        '''True if `rune_type` is an option of this choice, or of a choice
+        nested in it.'''
+        # pylint: disable=protected-access
+        for name in cls.model_fields:
+            option = cls._option_class(name)
+            if option is None:
+                if name == rune_type:
+                    return True
+            elif option._fqrtn() == rune_type:
+                return True
+            elif option._is_rune_choice() and option._choice_has_option(rune_type):
+                return True
+        return False
+
+    @classmethod
+    def _choice_to_fields(cls, data: dict) -> dict:
+        '''Converts a choice in the Rune JSON format to this class's fields,
+        with the option selected by `@type`.'''
+        if '@type' not in data:
+            if any(k.startswith('@ref') for k in data):
+                return data  # a reference to a choice
+            if '@data' in data:
+                metadata = {k: v for k, v in data.items() if k != '@data'}
+                return metadata | cls._choice_to_fields(data['@data'])
+            raise ValueError(f"Missing required '@type' for choice "
+                             f'{cls._fqrtn()}')
+        rune_type = data['@type']
+        body = {k: v for k, v in data.items() if k != '@type'}
+        # pylint: disable=protected-access
+        for name in cls.model_fields:
+            option = cls._option_class(name)
+            if option is None:
+                if name == rune_type:
+                    return {name: body['@data']}
+            elif option._fqrtn() == rune_type:
+                return {name: body}
+            elif option._is_rune_choice() and option._choice_has_option(rune_type):
+                return {name: data}
+        raise ValueError(f"'{rune_type}' is not an option of choice "
+                         f'{cls._fqrtn()}')
 
     @model_validator(mode='wrap')
     @classmethod
@@ -120,6 +233,8 @@ class BaseDataClass(BaseModel, ComplexTypeMetaDataMixin):
                           handler: ModelWrapValidatorHandler[Self]) -> Self:
         '''should resolve refs after creation'''
         if isinstance(data, dict):
+            if cls._is_rune_choice() and not _CONSTRUCTING.get():
+                data = cls._choice_to_fields(data)
             metadata = {k: v for k, v in data.items() if k.startswith('@')}
             if aux := cls._create_unresolved_ref(metadata):
                 return aux
