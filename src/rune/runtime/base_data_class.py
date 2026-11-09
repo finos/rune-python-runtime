@@ -179,8 +179,10 @@ class BaseDataClass(BaseModel, ComplexTypeMetaDataMixin,
         # pylint: disable=protected-access
         if option_cls._is_rune_choice():
             # A nested choice is already flat, unless the option has metadata
-            return ({'@type': option_cls._fqrtn()} | option
-                    if '@data' in option else option)
+            # or is a reference
+            if '@data' in option or any(k.startswith('@ref') for k in option):
+                return {'@type': option_cls._fqrtn()} | option
+            return option
         return {'@type': option_cls._fqrtn()} | {
             k: v for k, v in option.items() if k != '@type'}
 
@@ -353,6 +355,9 @@ class BaseDataClass(BaseModel, ComplexTypeMetaDataMixin,
             root_meta['@type'] = self._fqrtn()
             root_meta['@model'] = self._fqrtn().split('.', maxsplit=1)[0]
             root_meta['@version'] = self.get_model_version()
+            # The top-level object isn't held in a field, so no field
+            # serializer writes its own metadata
+            root_meta |= self.serialise_meta()
 
             return self.model_dump_json(indent=indent,
                                         include=include,

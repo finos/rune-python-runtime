@@ -55,6 +55,11 @@ choice ChoiceLocatedOption:
         [metadata location]
     string
 
+choice ChoiceRefOption:
+    ChoiceData
+        [metadata address "pointsTo"=Root->located]
+    B
+
 choice ChoiceDated:
     WithDate
     B
@@ -73,6 +78,7 @@ type Root:
     dateRef PaymentDate (0..1)
         [metadata reference]
     keyed Keyed (0..1)
+    refOption ChoiceRefOption (0..1)
     withMetaHooked ChoiceWithMeta (0..1)
     choiceRef ChoiceData (0..1)
         [metadata address "pointsTo"=Root->located]
@@ -212,6 +218,17 @@ class ChoiceLocatedOption(BaseDataClass):
     _KEY_REF_CONSTRAINTS = {'ChoiceData': {'@key:scoped'}}
 
 
+class ChoiceRefOption(BaseDataClass):
+    '''An option that is itself a choice, and is a reference.'''
+    _FQRTN: ClassVar[str] = f'{NS}.ChoiceRefOption'
+    _RUNE_CHOICE: ClassVar[bool] = True
+    ChoiceData: Annotated[Optional[_ChoiceData | BaseReference],
+                          _ChoiceData.serializer(),
+                          _ChoiceData.validator(('@ref:scoped', ))] = Field(None)
+    B: Optional[_B] = Field(None)
+    _KEY_REF_CONSTRAINTS = {'ChoiceData': {'@ref:scoped'}}
+
+
 class ChoiceDated(BaseDataClass):
     '''no doc'''
     _FQRTN: ClassVar[str] = f'{NS}.ChoiceDated'
@@ -249,6 +266,8 @@ class Root(BaseDataClass):
     withMetaHooked: Annotated[Optional[ChoiceWithMeta],
                               ChoiceWithMeta.serializer(),
                               ChoiceWithMeta.validator()] = Field(None)
+    refOption: Annotated[Optional[ChoiceRefOption], ChoiceRefOption.serializer(),
+                         ChoiceRefOption.validator()] = Field(None)
     choiceRef: Annotated[Optional[ChoiceData | BaseReference],
                          _ChoiceData.serializer(),
                          _ChoiceData.validator(('@ref:scoped', ))] = Field(None)
@@ -337,6 +356,17 @@ def test_round_trip_option_is_a_reference_on_field_with_hooks():
     model = Root.rune_deserialize(data, validate_model=False)
     assert model.withMetaHooked.Keyed is model.keyed
     assert _written(model, 'withMetaHooked') == data['withMetaHooked']
+
+
+def test_round_trip_nested_choice_option_is_a_reference():
+    '''an option that is a choice, and a reference, keeps its @type'''
+    data = {
+        'located': {'@key:scoped': 'outer', '@data': A_JSON},
+        'refOption': {'@type': f'{NS}.ChoiceData', '@ref:scoped': 'outer'},
+    }
+    model = Root.rune_deserialize(data, validate_model=False)
+    assert model.refOption.ChoiceData is model.located
+    assert _written(model, 'refOption') == data['refOption']
 
 
 def test_reference_without_type_refers_to_the_whole_choice():
