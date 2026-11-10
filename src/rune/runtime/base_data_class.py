@@ -1,19 +1,33 @@
 '''Base class for all Rune type classes'''
-from collections.abc import MutableSequence
-import logging
-import importlib
 import copy
+import importlib
 import json
-from typing import get_args, get_origin, Any, Literal
-from typing_extensions import Self
-from pydantic import (BaseModel, ValidationError, ConfigDict, model_serializer,
-                      model_validator, ModelWrapValidatorHandler)
+import logging
+from collections.abc import MutableSequence
+from typing import Any, Literal, Self
+
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    ModelWrapValidatorHandler,
+    ValidationError,
+    model_serializer,
+    model_validator,
+)
 from pydantic.main import IncEx
-from rune.runtime.conditions import ConditionViolationError
-from rune.runtime.conditions import get_conditions
-from rune.runtime.metadata import (REFS_CONTAINER, ComplexTypeMetaDataMixin, Reference,
-                                   UnresolvedReference, BaseMetaDataMixin,
-                                   _EnumWrapper, RUNE_OBJ_MAPS)
+
+from rune.runtime.conditions import ConditionViolationError, get_conditions
+from rune.runtime.metadata import (
+    REFS_CONTAINER,
+    RUNE_OBJ_MAPS,
+    BaseMetaDataMixin,
+    ComplexTypeMetaDataMixin,
+    Reference,
+    UnresolvedReference,
+    _EnumWrapper,
+)
+
+logger = logging.getLogger(__name__)
 
 ROOT_CONTAINER = '__rune_root_metadata'
 
@@ -40,17 +54,17 @@ class BaseDataClass(BaseModel, ComplexTypeMetaDataMixin):
             if name in self._get_rune_refs_container():
                 self._remove_rune_ref(name)
                 if isinstance(self.__dict__[name], _EnumWrapper):
-                    self.__dict__[name] = _EnumWrapper()
+                    self.__dict__[name] = _EnumWrapper()  # type: ignore
             # if the value is an enum, pass it to the EnumWrapper
             if (isinstance(self.__dict__[name], _EnumWrapper)
                     and not isinstance(value, _EnumWrapper)):
                 value = _EnumWrapper(value)
             # if the value is a "model", register as rune_parent
             if isinstance(value, BaseMetaDataMixin):
-                value._set_rune_parent(self)
+                value._set_rune_parent(self)  # type: ignore
             super().__setattr__(name, value)
 
-    def __eq__(self, other: Any) -> bool:
+    def __eq__(self, other: object) -> bool:
         if isinstance(other, BaseModel):
             # Align with Pydantic's equality semantics but avoid parent recursion
             self_type = self.__pydantic_generic_metadata__['origin'] or self.__class__
@@ -92,7 +106,7 @@ class BaseDataClass(BaseModel, ComplexTypeMetaDataMixin):
             if isinstance(data, BaseDataClass):
                 return {
                     name: getattr(data, name)
-                    for name in type(data).__pydantic_fields__.keys()
+                    for name in type(data).__pydantic_fields__
                 }
             return data
 
@@ -119,10 +133,11 @@ class BaseDataClass(BaseModel, ComplexTypeMetaDataMixin):
     def _deserialize_refs(cls, data: Any,
                           handler: ModelWrapValidatorHandler[Self]) -> Self:
         '''should resolve refs after creation'''
+        metadata = {}
         if isinstance(data, dict):
             metadata = {k: v for k, v in data.items() if k.startswith('@')}
             if aux := cls._create_unresolved_ref(metadata):
-                return aux
+                return aux  # type: ignore
         obj = handler(data)
         obj._init_rune_parent()  # pylint: disable=protected-access
         if isinstance(data, dict):
@@ -135,18 +150,19 @@ class BaseDataClass(BaseModel, ComplexTypeMetaDataMixin):
                 obj.set_meta(check_allowed=False, **keys)
                 obj._register_keys(keys)  # pylint: disable=protected-access
         obj.resolve_references(ignore_dangling=True, recurse=False)
-        # transfer refs that were established on the original before 
+        # transfer refs that were established on the original before
         # re-validation wiped them
-        if isinstance(data, BaseDataClass) and not obj._get_rune_refs_container():
-            if original_refs := data._get_rune_refs_container():
-                obj.__dict__[REFS_CONTAINER] = dict(original_refs)
+        if (isinstance(data, BaseDataClass)
+                and not obj._get_rune_refs_container()
+                and (original_refs := data._get_rune_refs_container())):
+            obj.__dict__[REFS_CONTAINER] = dict(original_refs)  # type: ignore
         return obj
 
     def _init_rune_parent(self):
         '''sets the rune parent in all properties'''
         refs = self._get_rune_refs_container()
         if not self.get_rune_parent() and RUNE_OBJ_MAPS not in self.__dict__:
-            self.__dict__[RUNE_OBJ_MAPS] = {}
+            self.__dict__[RUNE_OBJ_MAPS] = {}  # type: ignore
 
         for prop_nm, obj in self.__dict__.items():
             if prop_nm.startswith('__') or prop_nm in refs:
@@ -295,7 +311,7 @@ class BaseDataClass(BaseModel, ComplexTypeMetaDataMixin):
             # will not attempt to convert them.
             strict = False
         elif not isinstance(rune_data, dict):
-            raise ValueError(f'rune_data is of type {type(rune_data)}, '
+            raise TypeError(f'rune_data is of type {type(rune_data)}, '
                              'alas it has to be either dict or str!')
         else:
             rune_dict = copy.deepcopy(rune_data)
@@ -378,7 +394,7 @@ class BaseDataClass(BaseModel, ComplexTypeMetaDataMixin):
             self.model_validate(self, strict=strict)
         except ValidationError as validation_error:
             if raise_exc:
-                raise validation_error
+                raise
             return [validation_error]
         return []
 
@@ -395,29 +411,28 @@ class BaseDataClass(BaseModel, ComplexTypeMetaDataMixin):
             condition violations should be returned instead.
         '''
         self_rep = object.__repr__(self)
-        logging.info('Checking conditions for %s ...', self_rep)
+        logger.info('Checking conditions for %s ...', self_rep)
         exceptions = []
         for name, condition in get_conditions(self.__class__, BaseDataClass):
-            logging.info('Checking condition %s for %s...', name, self_rep)
+            logger.info('Checking condition %s for %s...', name, self_rep)
             if not condition(self):
-                msg = f'Condition "{name}" for {repr(self)} failed!'
-                logging.error(msg)
+                msg = f'Condition "{name}" for {self!r} failed!'
+                logger.error(msg)
                 exc = ConditionViolationError(msg)
                 if raise_exc:
                     raise exc
                 exceptions.append(exc)
             else:
-                logging.info('Condition %s for %s satisfied.', name, self_rep)
+                logger.info('Condition %s for %s satisfied.', name, self_rep)
         if recursively:
             for k, v in self.__dict__.items():
                 if k.startswith('__'):  # ignore *all* private vars!
                     continue
-                logging.info('Validating conditions of property %s', k)
+                logger.info('Validating conditions of property %s', k)
                 exceptions += _validate_conditions_recursively(
                     v, raise_exc=raise_exc)
         err = f'with {len(exceptions)}' if exceptions else 'without'
-        logging.info('Done conditions checking for %s %s errors.', self_rep,
-                     err)
+        logger.info('Done conditions checking for %s %s errors.', self_rep, err)
         return exceptions
 
     @classmethod
