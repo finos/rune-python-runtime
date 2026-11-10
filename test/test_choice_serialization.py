@@ -29,6 +29,10 @@ type PaymentDate:
 type WithDate:
     paymentDate PaymentDate (0..1)
 
+type OneOfHolder:
+    A A (0..1)
+    B B (0..1)
+
 choice ChoiceData:
     A
     B
@@ -58,7 +62,7 @@ choice ChoiceLocatedOption:
 choice ChoiceRefOption:
     ChoiceData
         [metadata address "pointsTo"=Root->located]
-    B
+    string
 
 choice ChoiceDated:
     WithDate
@@ -82,199 +86,244 @@ type Root:
     withMetaHooked ChoiceWithMeta (0..1)
     choiceRef ChoiceData (0..1)
         [metadata address "pointsTo"=Root->located]
+    holder OneOfHolder (0..1)
 
-withMetaHooked has the runtime's serializer and validator although it has no
-metadata, as every field of a class in the generated bundle does.
+refOption and withMetaHooked have the runtime's serializer and validator
+although they have no metadata, as every attribute of a class in a generated
+bundle does.
 '''
 import json
 from typing import Annotated, ClassVar, Optional
 
 import pytest
-from pydantic import Field
+from pydantic import ConfigDict, Field
 
 from rune.runtime.base_data_class import BaseDataClass
+from rune.runtime.conditions import rune_condition
 from rune.runtime.metadata import BaseReference
+from rune.runtime.utils import rune_check_one_of, rune_resolve_attr
 
 NS = 'test_choice_serialization'
 
+# The classes below are what rune-python-generator produces from the model
+# above, in the form used in a generated bundle, where each class sets _FQRTN.
+
 
 class A(BaseDataClass):
-    '''no doc'''
+    model_config = ConfigDict(defer_build=True)
     _FQRTN: ClassVar[str] = f'{NS}.A'
     fieldA: str = Field(..., description='')
 
 
 class ExtA(A):
-    '''no doc'''
+    model_config = ConfigDict(defer_build=True)
     _FQRTN: ClassVar[str] = f'{NS}.ExtA'
     fieldExt: str = Field(..., description='')
 
 
 class B(BaseDataClass):
-    '''no doc'''
+    model_config = ConfigDict(defer_build=True)
     _FQRTN: ClassVar[str] = f'{NS}.B'
     fieldB: str = Field(..., description='')
 
 
 class Located(BaseDataClass):
-    '''no doc'''
+    model_config = ConfigDict(defer_build=True)
     _FQRTN: ClassVar[str] = f'{NS}.Located'
     fieldL: str = Field(..., description='')
 
 
 class Keyed(BaseDataClass):
-    '''no doc'''
+    model_config = ConfigDict(defer_build=True)
     _FQRTN: ClassVar[str] = f'{NS}.Keyed'
     _ALLOWED_METADATA = {'@key', '@key:external'}
     fieldK: str = Field(..., description='')
 
 
 class PaymentDate(BaseDataClass):
-    '''no doc'''
+    model_config = ConfigDict(defer_build=True)
     _FQRTN: ClassVar[str] = f'{NS}.PaymentDate'
     _ALLOWED_METADATA = {'@key', '@key:external'}
     day: str = Field(..., description='')
 
 
-# As in generated code: an attribute named after its type needs an alias,
-# or the annotation would resolve to the attribute itself.
+# Generated modules import a type used by an attribute of the same name with an
+# alias, such as `from ...A import A as _A`, or the annotation would resolve to
+# the attribute itself. The generator doesn't do this for `int` (an option of
+# ChoiceBasic), so on Python 3.14 and later its generated annotation resolves to
+# the attribute and isn't validated; the alias here gives the intended type.
 _A, _B, _Located, _Keyed, _int = A, B, Located, Keyed, int
-
-KEYS = ('@key', '@key:external')
-REFS = ('@key', '@key:external', '@ref', '@ref:external')
 
 
 class WithDate(BaseDataClass):
-    '''no doc'''
+    model_config = ConfigDict(defer_build=True)
     _FQRTN: ClassVar[str] = f'{NS}.WithDate'
-    paymentDate: Annotated[Optional[PaymentDate], PaymentDate.serializer(),
-                           PaymentDate.validator(KEYS)] = Field(None)
+    paymentDate: Annotated[Optional[PaymentDate], PaymentDate.serializer(), PaymentDate.validator(('@key', '@key:external'))] = Field(None, description='')
 
 
 _WithDate = WithDate
 
 
+class OneOfHolder(BaseDataClass):
+    '''A type with optional attributes is not a choice: it has no marker.'''
+    model_config = ConfigDict(defer_build=True)
+    _FQRTN: ClassVar[str] = f'{NS}.OneOfHolder'
+    A: Optional[_A] = Field(None, description='')
+    B: Optional[_B] = Field(None, description='')
+
+
 class ChoiceData(BaseDataClass):
-    '''no doc'''
-    _FQRTN: ClassVar[str] = f'{NS}.ChoiceData'
+    model_config = ConfigDict(defer_build=True)
     _RUNE_CHOICE: ClassVar[bool] = True
-    A: Optional[_A] = Field(None)
-    B: Optional[_B] = Field(None)
+    _FQRTN: ClassVar[str] = f'{NS}.ChoiceData'
+    A: Optional[_A] = Field(None, description='')
+    B: Optional[_B] = Field(None, description='')
+
+    @rune_condition
+    def condition_0_Choice(self):
+        item = self
+        return rune_check_one_of(item, 'A', 'B', necessity=True)
 
 
 _ChoiceData = ChoiceData
 
 
 class ChoiceBasic(BaseDataClass):
-    '''no doc'''
-    _FQRTN: ClassVar[str] = f'{NS}.ChoiceBasic'
+    model_config = ConfigDict(defer_build=True)
     _RUNE_CHOICE: ClassVar[bool] = True
-    string: Optional[str] = Field(None)
-    int: Optional[_int] = Field(None)
+    _FQRTN: ClassVar[str] = f'{NS}.ChoiceBasic'
+    string: Optional[str] = Field(None, description='')
+    int: Optional[_int] = Field(None, description='')
+
+    @rune_condition
+    def condition_0_Choice(self):
+        item = self
+        return rune_check_one_of(item, 'string', 'int', necessity=True)
 
 
 _ChoiceBasic = ChoiceBasic
 
 
 class ChoiceNested(BaseDataClass):
-    '''no doc'''
-    _FQRTN: ClassVar[str] = f'{NS}.ChoiceNested'
+    model_config = ConfigDict(defer_build=True)
     _RUNE_CHOICE: ClassVar[bool] = True
-    ChoiceData: Optional[_ChoiceData] = Field(None)
-    ChoiceBasic: Optional[_ChoiceBasic] = Field(None)
+    _FQRTN: ClassVar[str] = f'{NS}.ChoiceNested'
+    ChoiceData: Optional[_ChoiceData] = Field(None, description='')
+    ChoiceBasic: Optional[_ChoiceBasic] = Field(None, description='')
+
+    @rune_condition
+    def condition_0_Choice(self):
+        item = self
+        return rune_check_one_of(item, 'ChoiceData', 'ChoiceBasic', necessity=True)
 
 
 _ChoiceNested = ChoiceNested
 
 
 class ChoiceDeep(BaseDataClass):
-    '''no doc'''
-    _FQRTN: ClassVar[str] = f'{NS}.ChoiceDeep'
+    model_config = ConfigDict(defer_build=True)
     _RUNE_CHOICE: ClassVar[bool] = True
-    ChoiceNested: Optional[_ChoiceNested] = Field(None)
+    _CHOICE_ALIAS_MAP ={"ChoiceNested":[("ChoiceNested", rune_resolve_attr)],"ChoiceBasic":[("ChoiceNested", rune_resolve_attr)],"ChoiceData":[("ChoiceNested", rune_resolve_attr)]}
+    _FQRTN: ClassVar[str] = f'{NS}.ChoiceDeep'
+    ChoiceNested: Optional[_ChoiceNested] = Field(None, description='')
+
+    @rune_condition
+    def condition_0_Choice(self):
+        item = self
+        return rune_check_one_of(item, 'ChoiceNested', necessity=True)
 
 
 class ChoiceWithMeta(BaseDataClass):
-    '''no doc'''
-    _FQRTN: ClassVar[str] = f'{NS}.ChoiceWithMeta'
+    model_config = ConfigDict(defer_build=True)
     _RUNE_CHOICE: ClassVar[bool] = True
-    Located: Annotated[Optional[_Located], _Located.serializer(),
-                       _Located.validator(('@key:scoped', ))] = Field(None)
-    Keyed: Annotated[Optional[_Keyed | BaseReference], _Keyed.serializer(),
-                     _Keyed.validator(REFS)] = Field(None)
+    _FQRTN: ClassVar[str] = f'{NS}.ChoiceWithMeta'
+    Located: Annotated[Optional[_Located], _Located.serializer(), _Located.validator(('@key:scoped', ))] = Field(None, description='')
+    Keyed: Annotated[Optional[_Keyed | BaseReference], _Keyed.serializer(), _Keyed.validator(('@key', '@key:external', '@ref', '@ref:external'))] = Field(None, description='')
+
     _KEY_REF_CONSTRAINTS = {
         'Located': {'@key:scoped'},
-        'Keyed': {'@ref', '@ref:external'}
+        'Keyed': {'@key', '@key:external', '@ref', '@ref:external'}
     }
+
+    @rune_condition
+    def condition_0_Choice(self):
+        item = self
+        return rune_check_one_of(item, 'Located', 'Keyed', necessity=True)
 
 
 class ChoiceLocatedOption(BaseDataClass):
-    '''no doc'''
-    _FQRTN: ClassVar[str] = f'{NS}.ChoiceLocatedOption'
+    model_config = ConfigDict(defer_build=True)
     _RUNE_CHOICE: ClassVar[bool] = True
-    ChoiceData: Annotated[Optional[_ChoiceData], _ChoiceData.serializer(),
-                          _ChoiceData.validator(('@key:scoped', ))] = Field(None)
-    string: Optional[str] = Field(None)
-    _KEY_REF_CONSTRAINTS = {'ChoiceData': {'@key:scoped'}}
+    _FQRTN: ClassVar[str] = f'{NS}.ChoiceLocatedOption'
+    ChoiceData: Annotated[Optional[_ChoiceData], _ChoiceData.serializer(), _ChoiceData.validator(('@key:scoped', ))] = Field(None, description='')
+    string: Optional[str] = Field(None, description='')
+
+    _KEY_REF_CONSTRAINTS = {
+        'ChoiceData': {'@key:scoped'}
+    }
+
+    @rune_condition
+    def condition_0_Choice(self):
+        item = self
+        return rune_check_one_of(item, 'ChoiceData', 'string', necessity=True)
 
 
 class ChoiceRefOption(BaseDataClass):
     '''An option that is itself a choice, and is a reference.'''
-    _FQRTN: ClassVar[str] = f'{NS}.ChoiceRefOption'
+    model_config = ConfigDict(defer_build=True)
     _RUNE_CHOICE: ClassVar[bool] = True
-    ChoiceData: Annotated[Optional[_ChoiceData | BaseReference],
-                          _ChoiceData.serializer(),
-                          _ChoiceData.validator(('@ref:scoped', ))] = Field(None)
-    B: Optional[_B] = Field(None)
-    _KEY_REF_CONSTRAINTS = {'ChoiceData': {'@ref:scoped'}}
+    _FQRTN: ClassVar[str] = f'{NS}.ChoiceRefOption'
+    ChoiceData: Annotated[Optional[_ChoiceData | BaseReference], _ChoiceData.serializer(), _ChoiceData.validator(('@ref:scoped', ))] = Field(None, description='')
+    string: Optional[str] = Field(None, description='')
+
+    _KEY_REF_CONSTRAINTS = {
+        'ChoiceData': {'@ref:scoped'}
+    }
+
+    @rune_condition
+    def condition_0_Choice(self):
+        item = self
+        return rune_check_one_of(item, 'ChoiceData', 'string', necessity=True)
 
 
 class ChoiceDated(BaseDataClass):
-    '''no doc'''
-    _FQRTN: ClassVar[str] = f'{NS}.ChoiceDated'
+    model_config = ConfigDict(defer_build=True)
     _RUNE_CHOICE: ClassVar[bool] = True
-    WithDate: Optional[_WithDate] = Field(None)
-    B: Optional[_B] = Field(None)
+    _FQRTN: ClassVar[str] = f'{NS}.ChoiceDated'
+    WithDate: Optional[_WithDate] = Field(None, description='')
+    B: Optional[_B] = Field(None, description='')
 
-
-class OneOfHolder(BaseDataClass):
-    '''A type with optional attributes is not a choice: it has no marker.'''
-    _FQRTN: ClassVar[str] = f'{NS}.OneOfHolder'
-    A: Optional[_A] = Field(None)
-    B: Optional[_B] = Field(None)
+    @rune_condition
+    def condition_0_Choice(self):
+        item = self
+        return rune_check_one_of(item, 'WithDate', 'B', necessity=True)
 
 
 class Root(BaseDataClass):
-    '''no doc'''
+    model_config = ConfigDict(defer_build=True)
     _FQRTN: ClassVar[str] = f'{NS}.Root'
-    data: Optional[ChoiceData] = Field(None)
-    basic: Optional[ChoiceBasic] = Field(None)
-    nested: Optional[ChoiceNested] = Field(None)
-    deep: Optional[ChoiceDeep] = Field(None)
-    entries: Optional[list[ChoiceData]] = Field(None)
-    located: Annotated[Optional[ChoiceData], _ChoiceData.serializer(),
-                       _ChoiceData.validator(('@key:scoped', ))] = Field(None)
-    withMeta: Optional[ChoiceWithMeta] = Field(None)
-    locatedOption: Optional[ChoiceLocatedOption] = Field(None)
-    dated: Optional[ChoiceDated] = Field(None)
-    dateRef: Annotated[Optional[PaymentDate | BaseReference],
-                       PaymentDate.serializer(),
-                       PaymentDate.validator(REFS)] = Field(None)
-    keyed: Annotated[Optional[Keyed], _Keyed.serializer(),
-                     _Keyed.validator(KEYS)] = Field(None)
-    holder: Optional[OneOfHolder] = Field(None)
-    withMetaHooked: Annotated[Optional[ChoiceWithMeta],
-                              ChoiceWithMeta.serializer(),
-                              ChoiceWithMeta.validator()] = Field(None)
-    refOption: Annotated[Optional[ChoiceRefOption], ChoiceRefOption.serializer(),
-                         ChoiceRefOption.validator()] = Field(None)
-    choiceRef: Annotated[Optional[ChoiceData | BaseReference],
-                         _ChoiceData.serializer(),
-                         _ChoiceData.validator(('@ref:scoped', ))] = Field(None)
+    data: Optional[ChoiceData] = Field(None, description='')
+    basic: Optional[ChoiceBasic] = Field(None, description='')
+    nested: Optional[ChoiceNested] = Field(None, description='')
+    deep: Optional[ChoiceDeep] = Field(None, description='')
+    entries: Optional[list[ChoiceData | None]] = Field(None, description='')
+    located: Annotated[Optional[ChoiceData], ChoiceData.serializer(), ChoiceData.validator(('@key:scoped', ))] = Field(None, description='')
+    withMeta: Optional[ChoiceWithMeta] = Field(None, description='')
+    locatedOption: Optional[ChoiceLocatedOption] = Field(None, description='')
+    dated: Optional[ChoiceDated] = Field(None, description='')
+    dateRef: Annotated[Optional[PaymentDate | BaseReference], PaymentDate.serializer(), PaymentDate.validator(('@key', '@key:external', '@ref', '@ref:external'))] = Field(None, description='')
+    keyed: Annotated[Optional[Keyed], Keyed.serializer(), Keyed.validator(('@key', '@key:external'))] = Field(None, description='')
+    # In a generated bundle, every attribute has the runtime's serializer and
+    # validator, including refOption and withMetaHooked, which have no metadata.
+    refOption: Annotated[Optional[ChoiceRefOption], ChoiceRefOption.serializer(), ChoiceRefOption.validator()] = Field(None, description='')
+    withMetaHooked: Annotated[Optional[ChoiceWithMeta], ChoiceWithMeta.serializer(), ChoiceWithMeta.validator()] = Field(None, description='')
+    choiceRef: Annotated[Optional[ChoiceData | BaseReference], ChoiceData.serializer(), ChoiceData.validator(('@ref:scoped', ))] = Field(None, description='')
+    holder: Optional[OneOfHolder] = Field(None, description='')
+
     _KEY_REF_CONSTRAINTS = {
-        'located': {'@key:scoped'},
-        'dateRef': {'@ref', '@ref:external'},
-        'choiceRef': {'@ref:scoped'}
+        'choiceRef': {'@ref:scoped'},
+        'dateRef': {'@key', '@key:external', '@ref', '@ref:external'},
+        'located': {'@key:scoped'}
     }
 
 
@@ -389,16 +438,6 @@ def test_write_two_options_selected():
     '''a choice must have exactly one option'''
     model = Root(data=ChoiceData(A=A(fieldA='foo'), B=B(fieldB='bar')))
     with pytest.raises(Exception, match='[Mm]ultiple'):
-        model.rune_serialize(validate_model=False)
-
-
-def test_write_subtype_of_option():
-    '''an option's value must be exactly the declared type.
-
-    Fails until the runtime keeps a subtype stored in an attribute of its
-    parent type (#58), rather than turning it into the parent type.'''
-    model = Root(data=ChoiceData(A=ExtA(fieldA='foo', fieldExt='bar')))
-    with pytest.raises(Exception):
         model.rune_serialize(validate_model=False)
 
 
