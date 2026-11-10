@@ -2,22 +2,25 @@
 # SPDX-License-Identifier: Apache-2.0
 
 '''test module for the annotated base rune types'''
-from datetime import date, time, datetime
-from enum import Enum
-from decimal import Decimal
 import json
+from datetime import date, datetime, time
+from decimal import Decimal
+from enum import Enum
+from typing import Annotated
+
 import pytest
-from typing_extensions import Annotated
 from pydantic import Field, ValidationError
 
 from rune.runtime.base_data_class import BaseDataClass
-from rune.runtime.metadata import NumberWithMeta
-from rune.runtime.metadata import DateWithMeta
-from rune.runtime.metadata import DateTimeWithMeta
-from rune.runtime.metadata import TimeWithMeta
-from rune.runtime.metadata import StrWithMeta
-from rune.runtime.metadata import EnumWithMetaMixin
-from rune.runtime.metadata import _EnumWrapper
+from rune.runtime.metadata import (
+    DateTimeWithMeta,
+    DateWithMeta,
+    EnumWithMetaMixin,
+    NumberWithMeta,
+    StrWithMeta,
+    TimeWithMeta,
+    _EnumWrapper,
+)
 
 
 class AnnotatedStringModel(BaseDataClass):
@@ -106,6 +109,27 @@ class AnnotatedEnumModel(BaseDataClass):
                       EnumType.serializer(),
                       EnumType.validator(
                           ('@scheme', ))] = Field(..., description='')
+
+
+class OptionalAnnotatedEnumModel(BaseDataClass):
+    '''Optional enum with metadata around the entire nullable type.'''
+    enum_t: Annotated[EnumType | None,
+                      EnumType.serializer(),
+                      EnumType.validator(('@scheme',))] = Field(
+                          None, validate_default=True)
+
+
+@pytest.fixture(params=[
+    pytest.param(lambda cls, data: cls(**data), id='constructor'),
+    pytest.param(lambda cls, data: cls.model_validate(data), id='model_validate'),
+    pytest.param(lambda cls, data: cls.model_validate_json(json.dumps(data)),
+                 id='model_validate_json'),
+    pytest.param(lambda cls, data: cls.rune_deserialize(data),
+                 id='rune_deserialize'),
+])
+def load_enum_model(request):
+    '''Exercise the public construction and deserialization entry points.'''
+    return request.param
 
 
 def test_dump_annotated_string_simple():
@@ -430,5 +454,75 @@ def test_annotated_enum_assignment():
     model.enum_t = EnumType.C
     assert model.enum_t != EnumType.B
     assert isinstance(model.enum_t, _EnumWrapper)
+
+
+@pytest.mark.parametrize('data', [{}, {'enum_t': None}])
+def test_optional_annotated_enum_accepts_none(load_enum_model, data):
+    '''Accept omitted values and explicit None, including validated defaults.'''
+    model = load_enum_model(OptionalAnnotatedEnumModel, data)
+    assert model.enum_t is None
+
+
+@pytest.mark.parametrize('data', [{}, {'enum_t': None}])
+def test_required_annotated_enum_rejects_none(load_enum_model, data):
+    '''Missing and null non-nullable enums must raise ValidationError.'''
+    with pytest.raises(ValidationError) as error:
+        load_enum_model(AnnotatedEnumModel, data)
+    assert error.value.errors()[0]['loc'] == ('enum_t',)
+
+
+@pytest.mark.parametrize('value', [
+    'A',
+    {'@data': 'A', '@scheme': 'http://fpml.org'},
+])
+def test_optional_annotated_enum_retains_value_and_metadata(load_enum_model, value):
+    '''Continue to wrap enum values and round-trip their metadata.'''
+    model = load_enum_model(OptionalAnnotatedEnumModel, {'enum_t': value})
+    assert isinstance(model.enum_t, _EnumWrapper)
+    assert model.enum_t.enum_instance is EnumType.A
+    expected_scheme = value.get('@scheme') if isinstance(value, dict) else None
+    assert model.enum_t.get_meta('scheme') == expected_scheme
+
+    expected = value if isinstance(value, dict) else {'@data': value}
+    serialized = model.model_dump_json()
+    assert json.loads(serialized) == {'enum_t': expected}
+    restored = OptionalAnnotatedEnumModel.model_validate_json(serialized)
+    assert restored.enum_t.enum_instance is EnumType.A
+    assert restored.enum_t.get_meta('scheme') == expected_scheme
+
+
+def test_optional_annotated_enum_accepts_enum_instance():
+    '''Keep accepting enum instances as well as strings and metadata objects.'''
+    model = OptionalAnnotatedEnumModel(enum_t=EnumType.A)
+    assert isinstance(model.enum_t, _EnumWrapper)
+    assert model.enum_t.enum_instance is EnumType.A
+
+
+@pytest.mark.parametrize('options, expected', [
+    ({}, {'enum_t': None}),
+    ({'exclude_none': True}, {}),
+    ({'exclude_defaults': True}, {}),
+])
+def test_optional_annotated_enum_serializes_none(options, expected):
+    '''Serialize None as null or omit it according to the dump options.'''
+    model = OptionalAnnotatedEnumModel(enum_t=None)
+    assert model.model_dump(**options) == expected
+    assert json.loads(model.model_dump_json(**options)) == expected
+
+
+@pytest.mark.parametrize('options, include_enum', [
+    ({}, False),
+    ({'exclude_defaults': False}, True),
+    ({'exclude_defaults': False, 'exclude_none': True}, False),
+])
+def test_optional_annotated_enum_rune_serializes_none(options, include_enum):
+    '''Rune serialization must honor null handling while adding root metadata.'''
+    model = OptionalAnnotatedEnumModel(enum_t=None)
+    serialized = json.loads(model.rune_serialize(**options))
+    assert '@type' in serialized
+    if include_enum:
+        assert serialized['enum_t'] is None
+    else:
+        assert 'enum_t' not in serialized
 
 # EOF

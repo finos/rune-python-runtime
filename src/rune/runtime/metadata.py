@@ -10,10 +10,14 @@ from collections.abc import Iterable
 from decimal import Decimal
 from enum import Enum
 from functools import lru_cache, partial
-from typing import Any, Never, Self, get_args
+from typing import Any, Self, get_args
 
-from pydantic import (PlainSerializer, PlainValidator,
-                      ValidatorFunctionWrapHandler, WrapSerializer, WrapValidator)
+from pydantic import (
+    PlainSerializer,
+    ValidatorFunctionWrapHandler,
+    WrapSerializer,
+    WrapValidator,
+)
 from pydantic_core import PydanticCustomError
 
 # from rune.runtime.object_registry import get_object
@@ -717,10 +721,10 @@ class _EnumWrapper(BaseMetaDataMixin):
 class EnumWithMetaMixin:
     '''holds the metadata associated with a Rune Enum'''
     @classmethod
-    def serialise(cls, obj, handler, info) -> dict:
+    def serialise(cls, obj, handler) -> dict:
         '''used as serialisation method with pydantic'''
         res = obj.serialise_meta()
-        res['@data'] = handler(obj.enum_instance, info)
+        res['@data'] = handler(obj.enum_instance)
         return res
 
     @classmethod
@@ -752,15 +756,21 @@ class EnumWithMetaMixin:
     @classmethod
     @lru_cache
     def serializer(cls):
-        '''should return the validator for the specific class'''
-        return WrapSerializer(cls.serialise, return_type=dict)
+        '''Serialize metadata only for non-null enum values.'''
+        return WrapSerializer(cls.serialise, return_type=dict,
+                              when_used='unless-none')
 
     @classmethod
     @lru_cache
-    def validator(cls, allowed_meta: tuple[str] | tuple[Never, ...] = ()):
-        '''default validator for the specific class'''
+    def validator(cls, allowed_meta: tuple[str, ...] = ()) -> WrapValidator:
+        '''Let the field schema validate None and deserialize Rune enums.'''
         allowed = set(allowed_meta)
-        return PlainValidator(partial(cls.deserialize, allowed_meta=allowed),
-                              json_schema_input_type=str | dict)
+
+        def validate(obj: Any, handler: ValidatorFunctionWrapHandler) -> Any:
+            if obj is None:
+                return handler(None)
+            return cls.deserialize(obj, allowed)
+
+        return WrapValidator(validate, json_schema_input_type=str | dict)
 
 # EOF
