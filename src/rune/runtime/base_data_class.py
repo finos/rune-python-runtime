@@ -317,6 +317,42 @@ class BaseDataClass(BaseModel, ComplexTypeMetaDataMixin):
                 raise_exc=raise_validation_errors)
         return model
 
+    @classmethod
+    def model_validate_json(cls,
+                            json_data: str | bytes | bytearray,
+                            *,
+                            strict: bool | None = None,
+                            extra: Any = None,
+                            context: Any | None = None,
+                            by_alias: bool | None = None,
+                            by_name: bool | None = None) -> Self:
+        '''Like pydantic's `model_validate_json`, but JSON numbers are read
+        as `Decimal`, so none are rounded.
+
+        Pydantic parses JSON numbers with a fraction or exponent as binary
+        floats, which round values beyond about 15 to 17 significant digits.
+
+        With `strict=True`, pydantic's own JSON parsing is kept, so strict
+        validation behaves as before. Validating parsed values strictly would
+        reject some JSON forms that are accepted today, such as an enum's
+        value or a UUID string.
+        '''
+        if strict:
+            return super().model_validate_json(json_data,
+                                               strict=strict,
+                                               extra=extra,
+                                               context=context,
+                                               by_alias=by_alias,
+                                               by_name=by_name)
+        # Decimal keeps every digit; a float would round long numbers
+        data = json.loads(json_data, parse_float=Decimal)
+        return cls.model_validate(data,
+                                  strict=strict,
+                                  extra=extra,
+                                  context=context,
+                                  by_alias=by_alias,
+                                  by_name=by_name)
+
     def resolve_references(self, ignore_dangling=False, recurse=True):
         '''resolves all attributes which are references'''
         if recurse:
