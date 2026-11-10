@@ -4,6 +4,7 @@ import importlib
 import json
 import logging
 from collections.abc import MutableSequence
+from decimal import Decimal
 from typing import Any, Literal, Self
 
 from pydantic import (
