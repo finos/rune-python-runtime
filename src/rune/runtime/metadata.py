@@ -721,10 +721,10 @@ class _EnumWrapper(BaseMetaDataMixin):
 class EnumWithMetaMixin:
     '''holds the metadata associated with a Rune Enum'''
     @classmethod
-    def serialise(cls, obj, handler, info) -> dict:
+    def serialise(cls, obj, handler) -> dict:
         '''used as serialisation method with pydantic'''
         res = obj.serialise_meta()
-        res['@data'] = handler(obj.enum_instance, info)
+        res['@data'] = handler(obj.enum_instance)
         return res
 
     @classmethod
