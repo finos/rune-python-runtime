@@ -3,6 +3,7 @@ from collections.abc import MutableSequence
 import logging
 import importlib
 import copy
+from decimal import Decimal
 import json
 from typing import get_args, get_origin, Any, Literal
 from typing_extensions import Self
@@ -289,7 +290,8 @@ class BaseDataClass(BaseModel, ComplexTypeMetaDataMixin):
             `BaseModel:` The Rune model.
         '''
         if isinstance(rune_data, str):
-            rune_dict = json.loads(rune_data)
+            # Decimal keeps every digit; a float would round long numbers
+            rune_dict = json.loads(rune_data, parse_float=Decimal)
             # NOTE: json.loads will not create the right atomic types
             # (e.g. date, datetime, time etc) and the strict model validate
             # will not attempt to convert them.
