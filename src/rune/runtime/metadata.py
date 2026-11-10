@@ -479,7 +479,11 @@ class ComplexTypeMetaDataMixin(BaseMetaDataMixin):
         if isinstance(obj, list):
             return [None if item is None else cls.serialise(item) for item in obj]
         res = obj.serialise_meta()
-        res |= obj.model_dump(exclude_unset=True, exclude_defaults=True)
+        dumped = obj.model_dump(exclude_unset=True, exclude_defaults=True)
+        if obj._is_rune_choice():  # pylint: disable=protected-access
+            # Metadata of the attribute sits beside the flattened choice
+            return res | {'@data': dumped} if res else dumped
+        res |= dumped
         if cls != obj.__class__:
             # pylint: disable=protected-access
             # res = {'@type': obj._FQRTN} | res
@@ -511,9 +515,26 @@ class ComplexTypeMetaDataMixin(BaseMetaDataMixin):
         for k, v in obj.items():
             (metadata if k.startswith('@') else fields)[k] = v
 
-        # References deserialization treatment
-        if aux := cls._create_unresolved_ref(metadata):
+        # pylint: disable=protected-access
+        # References deserialization treatment. A reference beside `@type`
+        # belongs to the selected choice option, not to this attribute.
+        is_option_of_choice = cls._is_rune_choice() and '@type' in metadata
+        if not is_option_of_choice and (aux := cls._create_unresolved_ref(metadata)):
             return aux
+
+        if cls._is_rune_choice():
+            if '@data' in metadata and '@type' not in metadata:
+                # Metadata of the attribute, beside the flattened choice
+                model = cls.model_validate(metadata.pop('@data'))
+            else:
+                # `@type` selects the option, and any metadata is the option's
+                model = cls.model_validate(obj)
+                metadata = {}
+            model.__dict__[META_CONTAINER] = metadata
+            if cls.meta_checks_enabled():
+                model._init_meta(allowed_meta)
+            model._register_keys(metadata)
+            return model
 
         # Model creation
         rune_cls = cls._type_to_cls(metadata)
