@@ -255,6 +255,9 @@ class BaseDataClass(BaseModel, ComplexTypeMetaDataMixin):
             root_meta['@type'] = self._fqrtn()
             root_meta['@model'] = self._fqrtn().split('.', maxsplit=1)[0]
             root_meta['@version'] = self.get_model_version()
+            # The top-level object isn't held in a field, so no field
+            # serializer writes its own metadata
+            root_meta |= self.serialise_meta()  # type: ignore
 
             return self.model_dump_json(indent=indent,
                                         include=include,
