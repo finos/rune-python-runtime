@@ -7,27 +7,42 @@ import json
 from typing import Annotated, Optional
 
 import pytest
-from pydantic import Field
+from pydantic import ConfigDict, Field
 
 from rune.runtime.base_data_class import BaseDataClass
+
+# The classes below are what rune-python-generator produces from this model:
+#
+#   type Party:
+#       [metadata key]
+#       name string (0..1)
+#
+#   type Trade:
+#       [metadata key]
+#       party Party (0..1)
+#
+#   type Plain:
+#       name string (0..1)
 
 
 class Party(BaseDataClass):
     '''no doc'''
+    model_config = ConfigDict(defer_build=True)
     _ALLOWED_METADATA = {'@key', '@key:external'}
-    name: Optional[str] = Field(None)
+    name: Optional[str] = Field(None, description='')
 
 
 class Trade(BaseDataClass):
     '''no doc'''
+    model_config = ConfigDict(defer_build=True)
     _ALLOWED_METADATA = {'@key', '@key:external'}
-    party: Annotated[Optional[Party], Party.serializer(),
-                     Party.validator(('@key', '@key:external'))] = Field(None)
+    party: Annotated[Optional[Party], Party.serializer(), Party.validator(('@key', '@key:external'))] = Field(None, description='')
 
 
 class Plain(BaseDataClass):
     '''a type without metadata'''
-    name: Optional[str] = Field(None)
+    model_config = ConfigDict(defer_build=True)
+    name: Optional[str] = Field(None, description='')
 
 
 def _round_trip(data: dict) -> dict:
@@ -44,20 +59,20 @@ def test_top_level_metadata_is_written(metadata):
     '''a key on the top-level object is written back'''
     written = _round_trip(metadata | {'party': {'name': 'A'}})
     for key, value in metadata.items():
-        assert written[key] == value
+        assert written.get(key) == value
 
 
 def test_top_level_and_field_metadata_are_both_written():
     '''writing the top-level key doesn't affect a key on a field'''
     written = _round_trip({'@key': 'k1', 'party': {'@key:external': 'e1', 'name': 'A'}})
-    assert written['@key'] == 'k1'
+    assert written.get('@key') == 'k1'
     assert written['party'] == {'@key:external': 'e1', 'name': 'A'}
 
 
 def test_top_level_metadata_with_validation():
     '''the key is also written with validation on'''
     obj = Trade.rune_deserialize({'@key': 'k1', 'party': {'name': 'A'}})
-    assert json.loads(obj.rune_serialize())['@key'] == 'k1'
+    assert json.loads(obj.rune_serialize()).get('@key') == 'k1'
 
 
 def test_rune_type_fields_are_kept():

@@ -9,13 +9,28 @@ significant digits without an error.
 '''
 from decimal import Decimal
 import json
-from typing import Optional
+from typing import Annotated, Optional
+
 import pytest
-from typing_extensions import Annotated
-from pydantic import Field
+from pydantic import ConfigDict, Field
 
 from rune.runtime.base_data_class import BaseDataClass
 from rune.runtime.metadata import NumberWithMeta
+
+# The classes below are what rune-python-generator produces from this model:
+#
+#   type PlainNumber:
+#       amount number (0..1)
+#
+#   type NumberList:
+#       amounts number (0..*)
+#
+#   type NumberWithScheme:
+#       amount number (1..1)
+#           [metadata scheme]
+#
+#   type IntAttribute:
+#       total int (0..1)
 
 _LONG_PRECISION = [
     '12345678901234567.89',
@@ -26,24 +41,26 @@ _LONG_PRECISION = [
 
 class PlainNumber(BaseDataClass):
     '''number attribute'''
-    amount: Optional[Decimal] = Field(None)
+    model_config = ConfigDict(defer_build=True)
+    amount: Optional[Decimal] = Field(None, description='')
 
 
 class NumberList(BaseDataClass):
     '''multi-cardinality number attribute'''
-    amounts: list[Decimal] = Field([])
+    model_config = ConfigDict(defer_build=True)
+    amounts: Optional[list[Decimal | None]] = Field(None, description='')
 
 
 class NumberWithScheme(BaseDataClass):
     '''number attribute with metadata'''
-    amount: Annotated[NumberWithMeta,
-                      NumberWithMeta.serializer(),
-                      NumberWithMeta.validator(('@scheme',))] = Field(...)
+    model_config = ConfigDict(defer_build=True)
+    amount: Annotated[NumberWithMeta, NumberWithMeta.serializer(), NumberWithMeta.validator(('@scheme', ))] = Field(..., description='')
 
 
 class IntAttribute(BaseDataClass):
     '''int attribute'''
-    count: Optional[int] = Field(None)
+    model_config = ConfigDict(defer_build=True)
+    total: Optional[int] = Field(None, description='')
 
 
 def _read(cls, document: str):
@@ -97,9 +114,9 @@ def test_long_precision_survives_writing():
     '''The exact value read is the value written.'''
     text = _LONG_PRECISION[0]
     written = _read(PlainNumber, f'{{"amount": {text}}}').rune_serialize(validate_model=False)
-    assert Decimal(json.loads(written)['amount']) == Decimal(text)
+    assert Decimal(json.loads(written).get('amount')) == Decimal(text)
 
 
 def test_int_attribute_accepts_whole_number_with_fraction():
     '''A whole value such as 10.0 is still accepted by an int attribute.'''
-    assert _read(IntAttribute, '{"count": 10.0}').count == 10
+    assert _read(IntAttribute, '{"total": 10.0}').total == 10
