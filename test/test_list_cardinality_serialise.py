@@ -214,6 +214,25 @@ def test_python_list_keeps_reference_and_inline_occurrences_distinct():
     ]
 
 
+@pytest.mark.parametrize('wrapped', [False, True], ids=['list', 'cow_list'])
+def test_reference_list_reuses_existing_external_keys(wrapped):
+    '''The generated list as-key pattern preserves targets and existing keys.'''
+    parties = [Party(name='A'), Party(name='B')]
+    for index, party in enumerate(parties):
+        party.set_external_key(f'p{index}')
+    before = [party.serialise_meta() for party in parties]
+    values = rune_cow(parties) if wrapped else parties
+
+    model = Holder(parties=parties,
+                   refs=[Reference(value) for value in values if value is not None])
+
+    assert all(target is party for target, party in zip(model.refs, parties))
+    assert json.loads(model.rune_serialize())['refs'] == [
+        {'@ref:external': 'p0'}, {'@ref:external': 'p1'},
+    ]
+    assert [party.serialise_meta() for party in parties] == before
+
+
 def test_unresolved_list_references_are_rejected():
     '''Staged dangling references may be retained, but cannot be serialized.'''
     model = Holder.model_validate({'refs': [{'@ref:external': 'missing'}]})

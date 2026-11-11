@@ -1,14 +1,19 @@
 '''test key generation/retrieval runtime functions'''
+import inspect
 import json
 from decimal import Decimal
+from typing import Optional
 from typing_extensions import Annotated
 import pytest
-from pydantic import Field, ValidationError
+from pydantic import ConfigDict, Field, InstanceOf, ValidationError, validate_call
 
 from rune.runtime.base_data_class import BaseDataClass
 from rune.runtime.cow import rune_cow
-from rune.runtime.metadata import Reference, KeyType
+from rune.runtime.func_proxy import replaceable
+from rune.runtime.metadata import BaseReference, KeyType, Reference
 from rune.runtime.metadata import NumberWithMeta, StrWithMeta
+from rune.runtime.object_builder import ObjectBuilder
+from rune.runtime.utils import rune_resolve_attr
 
 
 class CashFlow(BaseDataClass):
@@ -185,6 +190,45 @@ class DummyBiLoan(BaseDataClass):
     '''more complex model'''
     loan1: DummyLoan2
     loan2: DummyLoan2
+
+
+# Generated-style fixtures from issue #73: a keyed Party, a Holder with a
+# reference field, and `set h -> party: p as-key` in the RefOne function.
+class Party(BaseDataClass):
+    '''Keyed party from the generated-function reproducer in issue #73.'''
+    model_config = ConfigDict(defer_build=True)
+    _ALLOWED_METADATA = {'@key', '@key:external'}
+    name: str = Field(..., description='')
+
+
+class Holder(BaseDataClass):
+    '''Reference field with the annotations emitted by the generator.'''
+    model_config = ConfigDict(defer_build=True)
+    party: Annotated[
+        Optional[Party | BaseReference],
+        Party.serializer(),
+        Party.validator(('@key', '@key:external', '@ref', '@ref:external')),
+    ] = Field(None, description='')
+    _KEY_REF_CONSTRAINTS = {
+        'party': {'@key', '@key:external', '@ref', '@ref:external'},
+    }
+
+
+@replaceable
+@validate_call
+def RefOne(p: InstanceOf[Party]) -> Holder:
+    '''Reproduce the generated function from issue #73.'''
+    self = inspect.currentframe()
+    p = rune_cow(p)
+    h = ObjectBuilder(Holder)
+    h.party = Reference(rune_resolve_attr(self, "p"))
+    return h
+
+
+def _party_with_external_key() -> Party:
+    party = Party(name='A')
+    party.set_external_key('p1', KeyType.EXTERNAL)
+    return party
 
 
 def test_key_generation():
@@ -471,6 +515,79 @@ def test_reference_cow_object_with_ext_key_defaults_external():
     assert ref.target is cf
     assert cf.get_meta('@key:external') == 'ext_key1'
     assert cf.get_object_by_key('ext_key1', KeyType.EXTERNAL) is cf
+
+
+@pytest.mark.parametrize('wrapped', [False, True], ids=['model', 'cow'])
+@pytest.mark.parametrize('has_internal_key', [False, True])
+def test_reference_reuses_existing_external_key(wrapped, has_internal_key):
+    '''Implicit references prefer an existing external key without adding keys.'''
+    cf = CashFlow(currency='EUR', amount=100)
+    cf.set_external_key('ext_key1')
+    if has_internal_key:
+        cf.get_or_create_key()
+    before = cf.serialise_meta()
+
+    ref = Reference(rune_cow(cf) if wrapped else cf)
+    model = DummyLoan2(loan=cf, repayment=ref)
+
+    assert ref.target is cf
+    assert ref.target_key == 'ext_key1'
+    assert ref.key_type is KeyType.EXTERNAL
+    assert model.repayment is cf
+    assert json.loads(model.rune_serialize())['repayment'] == {
+        '@ref:external': 'ext_key1',
+    }
+    assert cf.serialise_meta() == before
+
+
+def test_as_key_uses_the_existing_external_key():
+    '''Issue #73: the generated function must serialize the existing key.'''
+    written = json.loads(RefOne(_party_with_external_key()).rune_serialize(validate_model=False))
+    assert written.get('party') == {'@ref:external': 'p1'}
+
+
+def test_as_key_leaves_the_input_unchanged():
+    '''Issue #73: an externally keyed input must not gain an internal key.'''
+    party = _party_with_external_key()
+    before = party.serialise_meta()
+    RefOne(party)
+    assert party.serialise_meta() == before
+
+
+@pytest.mark.parametrize('wrapped', [False, True], ids=['model', 'cow'])
+def test_reference_reuses_existing_internal_key(wrapped):
+    '''An existing internal key remains usable when no external key exists.'''
+    cf = CashFlow(currency='EUR', amount=100)
+    key = cf.get_or_create_key()
+    before = cf.serialise_meta()
+
+    ref = Reference(rune_cow(cf) if wrapped else cf)
+
+    assert ref.target is cf
+    assert ref.target_key == key
+    assert ref.key_type is KeyType.INTERNAL
+    assert cf.serialise_meta() == before
+
+
+@pytest.mark.parametrize('wrapped', [False, True], ids=['model', 'cow'])
+@pytest.mark.parametrize('has_internal_key', [False, True])
+def test_reference_explicit_internal_type_overrides_external_key(
+        wrapped, has_internal_key):
+    '''Explicit internal references reuse or create an internal key as requested.'''
+    cf = CashFlow(currency='EUR', amount=100)
+    cf.set_external_key('ext_key1')
+    key = cf.get_or_create_key() if has_internal_key else None
+
+    ref = Reference(rune_cow(cf) if wrapped else cf, key_type=KeyType.INTERNAL)
+
+    assert ref.target is cf
+    assert ref.key_type is KeyType.INTERNAL
+    assert ref.target_key == cf.get_meta('@key')
+    assert ref.target_key
+    if key is not None:
+        assert ref.target_key == key
+    assert cf.get_meta('@key:external') == 'ext_key1'
+    assert cf.get_object_by_key(ref.target_key, KeyType.INTERNAL) is cf
 
 
 def test_reference_object_with_non_internal_key_type_raises():

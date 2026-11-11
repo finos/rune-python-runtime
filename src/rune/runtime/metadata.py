@@ -98,7 +98,11 @@ class BaseReference:
 
 
 class Reference(BaseReference):
-    '''manages a reference to a object with a key'''
+    '''Reference a target using an explicit key or an inferred key.
+
+    Inferred references prefer an existing external key, otherwise reusing or
+    creating an internal key. An explicit INTERNAL key type selects the latter.
+    '''
     def __init__(self,
                  target: str | Any,
                  ext_key: str | None = None,
@@ -120,8 +124,12 @@ class Reference(BaseReference):
                 raise ValueError('key_type should be None or INTERNAL when '
                                  'passing in an object without a key!')
             self.target = target
-            self.target_key = target.get_or_create_key()
-            self.key_type = KeyType.INTERNAL
+            if key_type is None and (external_key := target.get_meta('@key:external')):
+                self.target_key = external_key
+                self.key_type = KeyType.EXTERNAL
+            else:
+                self.target_key = target.get_or_create_key()
+                self.key_type = KeyType.INTERNAL
         else:
             key_type = key_type or KeyType.EXTERNAL
             self.target_key = target
