@@ -24,6 +24,7 @@ from rune.runtime.metadata import (
     StrWithMeta,
     UnresolvedReference,
 )
+from rune.runtime.object_builder import ObjectBuilder
 from rune.runtime.utils import rune_add_to_list, rune_sorted
 
 NS = 'test_list_cardinality_serialise'
@@ -366,6 +367,55 @@ def test_rune_sorted_skip_none_keeps_reference_list_type_when_empty():
     assert result == []
     assert list(result.reference_items()) == []
     assert model.refs == [None, None]
+
+
+@pytest.mark.parametrize('copy_kind', ['copy', 'slice', 'sorted', 'sorted-cow'])
+def test_object_builder_preserves_copied_reference_list_metadata(copy_kind):
+    '''Building a model retains distinct reference/inline occurrences after copying.'''
+    first = Party(name='A')
+    second = Party(name='B')
+    source = Holder(refs=[Reference(second, 'p-b'), first, Reference(first, 'p-a')])
+    before = json.loads(source.rune_serialize())['refs']
+    if copy_kind == 'copy':
+        copied = source.refs.copy()
+    elif copy_kind == 'slice':
+        copied = source.refs[:]
+    else:
+        values = rune_cow(source).refs if copy_kind == 'sorted-cow' else source.refs
+        copied = rune_sorted(values, key=lambda party: party.name, skip_none=True)
+    expected = [before[1], before[2], before[0]] if copy_kind.startswith('sorted') else before
+    builder = ObjectBuilder(Holder, refs=copied)
+
+    normalized = builder.to_dict()['refs']
+    result = builder.to_model()
+
+    assert type(normalized) is type(copied)
+    assert normalized is not copied
+    assert json.loads(result.rune_serialize())['refs'] == expected
+    assert result.refs[0 if copy_kind.startswith('sorted') else 1] is first
+    assert json.loads(source.rune_serialize())['refs'] == before
+    result.refs.pop()
+    assert len(copied) == len(source.refs) == 3
+
+
+def test_object_builder_normalizes_nested_builders_in_reference_lists():
+    '''Preserving metadata still recursively materializes inline builder values.'''
+    party = Party(name='A')
+    source = Holder(refs=[Reference(party, 'p1'), party])
+    before = json.loads(source.rune_serialize())['refs']
+    copied = source.refs.copy()
+    nested = ObjectBuilder(name='B')
+    copied.append(nested)
+    builder = ObjectBuilder(Holder, refs=copied)
+
+    normalized = builder.to_dict()['refs']
+    result = builder.to_model()
+
+    assert type(normalized) is type(copied)
+    assert normalized[-1] == {'name': 'B'}
+    assert json.loads(result.rune_serialize())['refs'] == before + [{'name': 'B'}]
+    assert copied[-1] is nested
+    assert json.loads(source.rune_serialize())['refs'] == before
 
 
 def test_reference_list_assignment_and_addition_preserve_metadata():

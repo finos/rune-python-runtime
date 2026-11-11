@@ -5,6 +5,7 @@ import copy
 from typing import Any
 
 from rune.runtime.base_data_class import BaseDataClass
+from rune.runtime.reference_list import _ReferenceList
 from rune.runtime.utils import rune_mangle_name
 
 __all__ = ['ObjectBuilder']
@@ -76,6 +77,8 @@ class ObjectBuilder:
             return value.to_dict()
         if isinstance(value, dict):
             return {k: cls._normalize(v) for k, v in value.items()}
+        if isinstance(value, _ReferenceList):
+            return value.with_values(cls._normalize(v) for v in value)
         if isinstance(value, list):
             return [cls._normalize(v) for v in value]
         if isinstance(value, tuple):
