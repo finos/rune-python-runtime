@@ -4,7 +4,7 @@
 '''List storage that keeps reference metadata with each occurrence.'''
 import copy
 import operator
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
 from typing import TYPE_CHECKING, Any, Self, SupportsIndex
 
 if TYPE_CHECKING:
@@ -41,6 +41,24 @@ class _ReferenceList(list):
     def reference_at(self, index: int) -> tuple[str, 'KeyType'] | None:
         '''Return the reference recorded for one occurrence, if any.'''
         return self._references[index]
+
+    def has_references(self) -> bool:
+        '''Return whether any occurrence has a resolved reference key.'''
+        return any(self._references)
+
+    def reference_items(self) -> Iterator[tuple[Any, tuple[str, 'KeyType']]]:
+        '''Yield only targets with reference metadata.'''
+        return ((value, reference) for value, reference in zip(self, self._references)
+                if reference is not None)
+
+    def contained_values(self) -> Iterator[Any]:
+        '''Yield inline entries without following reference edges.'''
+        if not self.has_references():
+            yield from self
+        else:
+            for value, reference in zip(self, self._references):
+                if reference is None:
+                    yield value
 
     def bind(self, index: int, target: Any, key: str, key_type: 'KeyType') -> None:
         '''Replace a reference token with its target without losing its key.'''

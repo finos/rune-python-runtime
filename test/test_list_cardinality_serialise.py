@@ -459,3 +459,105 @@ def test_list_reference_aliases_and_bare_list_schema():
     assert model.refs[0] is model.parties[0]
     assert model.model_dump(by_alias=True)['references'] == [{'@ref:external': 'p1'}]
     assert model.model_dump(exclude={'refs'}) == {'parties': [{'name': 'A'}]}
+
+
+def test_reference_field_caches_follow_deferred_model_rebuild():
+    '''A cached placeholder must not hide a reference field added by the generator.'''
+    class DeferredHolder(BaseDataClass):
+        parties: list[Party]
+        refs: None = None
+        _KEY_REF_CONSTRAINTS = {}
+
+    DeferredHolder(parties=[])
+    DeferredHolder.model_fields['refs'].annotation = list[Party | BaseReference]
+    DeferredHolder.__annotations__['refs'] = list[Party | BaseReference]
+    constraints = DeferredHolder.__private_attributes__['_KEY_REF_CONSTRAINTS'].default
+    constraints['refs'] = {'@ref:external'}
+    DeferredHolder.model_rebuild(force=True)
+
+    model = DeferredHolder.rune_deserialize({
+        'parties': [{'@key:external': 'p1', 'name': 'A'}],
+        'refs': [{'@ref:external': 'p1'}],
+    })
+    assert model.refs[0] is model.parties[0]
+    assert model.model_dump()['refs'] == [{'@ref:external': 'p1'}]
+
+    # Rebuilding must invalidate cached permissions as well as field shapes.
+    constraints.clear()
+    DeferredHolder.model_rebuild(force=True)
+    with pytest.raises(ValidationError, match='not allowed'):
+        DeferredHolder(parties=[], refs=[Reference(Party(name='B'), 'p2')])
+
+
+def test_rebuild_preserves_local_forward_reference_resolution():
+    '''The cache-invalidating wrapper must preserve Pydantic's caller namespace.'''
+    class DeferredContainer(BaseDataClass):
+        child: 'LaterChild'
+
+    class LaterChild(BaseDataClass):
+        name: str
+
+    DeferredContainer.model_rebuild()
+    model = DeferredContainer(child={'name': 'A'})
+
+    assert isinstance(model.child, LaterChild)
+    assert model.child.get_rune_parent() is model
+
+
+def test_public_resolution_registers_mutated_sibling_subtrees_first():
+    '''New targets in a later branch must be registered before resolving earlier refs.'''
+    class Groups(BaseDataClass):
+        groups: list[NestedHolder]
+
+    model = Groups.model_validate({'groups': [
+        {'holders': [{'refs': [{'@ref:external': 'later'}]}], 'parties': []},
+        {'holders': [], 'parties': []},
+    ]})
+    party = Party(name='Later')
+    party.set_external_key('later')
+    model.groups[1].parties.append(party)
+
+    model.resolve_references()
+
+    assert model.groups[0].holders[0].refs[0] is party
+    assert party.get_rune_parent() is model.groups[1]
+    model.resolve_references()
+    assert model.validate_model() == []
+
+
+def test_revalidation_preserves_shared_parents_and_copies_registry_dictionaries():
+    '''Revalidation shares retained children without sharing registry dictionaries.'''
+    model = Holder.rune_deserialize({
+        'parties': [{'@key:external': 'p1', 'name': 'A'}],
+        'refs': [{'@ref:external': 'p1'}],
+    })
+
+    validated = Holder.model_validate(model)
+
+    assert validated is not model
+    assert validated.parties[0] is model.parties[0]
+    assert validated.refs[0] is model.parties[0]
+    assert model.parties[0].get_rune_parent() is model
+    source_keys = model._get_object_map(KeyType.EXTERNAL)
+    validated_keys = validated._get_object_map(KeyType.EXTERNAL)
+    assert validated_keys is not source_keys
+    assert validated_keys['p1'] is source_keys['p1']
+    validated_keys['p2'] = Party(name='B')
+    assert 'p2' not in source_keys
+
+
+def test_reference_lists_keep_value_equality_and_first_equal_remove():
+    '''Equality and remove follow normal list semantics, independently of reference intent.'''
+    first = Party(name='A')
+    second = Party(name='A')
+    model = Holder(refs=[Reference(first, 'p1'), second])
+
+    assert first is not second
+    assert model.refs == [second, second]
+    assert model.refs[:1] == model.refs[1:]
+
+    model.refs.remove(second)
+
+    assert model.refs[0] is second
+    assert model.resolve_ref_key('refs', 0) is None
+    assert json.loads(model.rune_serialize())['refs'] == [{'name': 'A'}]

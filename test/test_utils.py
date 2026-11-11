@@ -1,6 +1,8 @@
 """Tests for runtime utility helpers."""
 import inspect
 
+import pytest
+
 from rune.runtime.base_data_class import BaseDataClass
 from rune.runtime.cow import rune_cow, rune_unwrap
 from rune.runtime.func_proxy import (
@@ -9,6 +11,7 @@ from rune.runtime.func_proxy import (
     rune_call_unchecked_raw,
 )
 from rune.runtime.utils import (
+    rune_add_to_list,
     rune_any_elements,
     rune_all_elements,
     rune_check_cardinality,
@@ -16,6 +19,13 @@ from rune.runtime.utils import (
     rune_flatten_list,
     rune_get_only_element,
 )
+
+
+@pytest.mark.parametrize('destination', [None, (), {}])
+def test_rune_add_to_list_rejects_invalid_destinations_with_type_error(destination):
+    '''Generated add operations report an invalid destination as a type error.'''
+    with pytest.raises(TypeError, match='rune_add_to_list'):
+        rune_add_to_list(destination, 1)
 
 
 class _UncheckedChild(BaseDataClass):

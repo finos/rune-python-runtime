@@ -9,7 +9,7 @@ import uuid
 from collections.abc import Iterable
 from decimal import Decimal
 from enum import Enum
-from functools import lru_cache, partial
+from functools import cache, lru_cache, partial
 from typing import Any, Self, get_args
 
 from pydantic import (
@@ -304,9 +304,11 @@ class BaseMetaDataMixin:
                              f'currently existing meta slots: {current_meta}')
         meta |= {k: None for k in allowed_meta - current_meta}
 
-    def _reference_constraints(self, property_nm: str) -> set[str]:
+    @classmethod
+    @cache
+    def _reference_constraints(cls, property_nm: str) -> frozenset[str]:
         '''Find inherited constraints while honoring explicit constraint overrides.'''
-        for base in type(self).__mro__:
+        for base in cls.__mro__:
             constraints = base.__dict__.get('_KEY_REF_CONSTRAINTS', {})
             owns_constraints = '_KEY_REF_CONSTRAINTS' in base.__dict__
             private = base.__dict__.get('__private_attributes__', {}).get('_KEY_REF_CONSTRAINTS')
@@ -316,10 +318,10 @@ class BaseMetaDataMixin:
                 constraints = private.default
                 owns_constraints = True
             if property_nm in constraints:
-                return set(constraints[property_nm])
+                return frozenset(constraints[property_nm])
             if owns_constraints and property_nm in getattr(base, '__annotations__', {}):
-                return set()
-        return set()
+                return frozenset()
+        return frozenset()
 
     def _check_reference(self, property_nm: str, target: Any, key_type: KeyType,
                          old_val: Any, already_bound: bool = False) -> None:
