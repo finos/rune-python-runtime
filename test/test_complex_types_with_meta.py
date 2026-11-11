@@ -135,6 +135,27 @@ def test_complex_type_preserves_subtype_identity():
     assert model.loan.get_rune_parent() is model
 
 
+@pytest.mark.parametrize('model_type, field_name', [
+    (OptionalLoan, 'loan'),
+    (OptionalLoanBook, 'loans'),
+])
+@pytest.mark.parametrize('options, include_null', [
+    ({}, True),
+    ({'exclude_none': True}, False),
+    ({'exclude_defaults': True}, False),
+])
+def test_optional_complex_values_serialize_none(model_type, field_name,
+                                               options, include_null):
+    '''Null complex values and lists honor the public dump options.'''
+    model = model_type(**{field_name: None})
+    expected = {field_name: None} if include_null else {}
+
+    assert model.model_dump(**options) == expected
+    assert json.loads(model.model_dump_json(**options)) == expected
+    written = json.loads(model.rune_serialize(**({'exclude_defaults': False} | options)))
+    assert (field_name in written) == include_null
+
+
 def test_create_loan_no_meta():
     '''tests the creation of a simple model - no meta'''
     model = DummyLoan(loan=CashFlow(currency='EUR', amount=100),

@@ -1,24 +1,42 @@
 '''Utility functions (runtime) for rune models.'''
 from __future__ import annotations
-import logging
-import keyword
-import inspect
+
 import datetime
-from collections.abc import MutableSequence
+import inspect
+import keyword
+import logging
+from collections.abc import Callable, Iterable, MutableSequence
 from enum import Enum
-from typing import Callable, Any
+from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
 from dateutil import parser
 
 __all__ = [
-    'if_cond_fn', 'Multiprop', 'rune_any_elements', 'rune_get_only_element',
-    'rune_filter', 'rune_all_elements', 'rune_contains', 'rune_disjoint',
-    'rune_join', 'rune_flatten_list', 'rune_resolve_attr',
-    'rune_resolve_deep_attr', 'rune_count', 'rune_attr_exists',
-    'rune_add_to_list', 'rune_check_cardinality', 'rune_str',
-    'rune_check_one_of', 'rune_zoned_date_time', 'rune_wrap_none',
-    'rune_resolve_attr_values'
+    'Multiprop',
+    'if_cond_fn',
+    'rune_add_to_list',
+    'rune_all_elements',
+    'rune_any_elements',
+    'rune_attr_exists',
+    'rune_check_cardinality',
+    'rune_check_one_of',
+    'rune_contains',
+    'rune_count',
+    'rune_disjoint',
+    'rune_filter',
+    'rune_flatten_list',
+    'rune_get_only_element',
+    'rune_join',
+    'rune_resolve_attr',
+    'rune_resolve_attr_values',
+    'rune_resolve_deep_attr',
+    'rune_str',
+    'rune_wrap_none',
+    'rune_zoned_date_time'
 ]
+
+logger = logging.getLogger(__name__)
 
 
 def if_cond_fn(ifexpr: bool, thenexpr: Callable, elseexpr: Callable) -> Any:
@@ -121,10 +139,10 @@ def rune_check_one_of(obj, *attr_names, necessity=True) -> bool:
         vals = [getattr(obj, n, None) for n in attr_names]
     n_attr = sum(1 for v in vals if rune_attr_exists(v))
     if necessity and n_attr != 1:
-        logging.error('One and only one of %s should be set!', attr_names)
+        logger.error('One and only one of %s should be set!', attr_names)
         return False
     if not necessity and n_attr > 1:
-        logging.error('Only one of %s can be set!', attr_names)
+        logger.error('Only one of %s can be set!', attr_names)
         return False
     return True
 
@@ -143,9 +161,7 @@ def rune_attr_exists(val: Any) -> bool:
     '''Implements the rune semantics of property existence'''
     if val is None:
         return False
-    if isinstance(val, MutableSequence) and len(val) == 0:
-        return False
-    return True
+    return not (isinstance(val, MutableSequence) and len(val) == 0)
 
 
 def rune_str(x: Any) -> str:
@@ -240,10 +256,10 @@ def _cmp_operand(v):
 _cmp = {
     '=': lambda x, y: _cmp_operand(x) == _cmp_operand(y),
     '<>': lambda x, y: _cmp_operand(x) != _cmp_operand(y),
-    '>=': lambda x, y: _cmp_operand(x) >= _cmp_operand(y),
-    '<=': lambda x, y: _cmp_operand(x) <= _cmp_operand(y),
-    '>': lambda x, y: _cmp_operand(x) > _cmp_operand(y),
-    '<': lambda x, y: _cmp_operand(x) < _cmp_operand(y)
+    '>=': lambda x, y: _cmp_operand(x) >= _cmp_operand(y),  # type: ignore
+    '<=': lambda x, y: _cmp_operand(x) <= _cmp_operand(y),  # type: ignore
+    '>': lambda x, y: _cmp_operand(x) > _cmp_operand(y),  # type: ignore
+    '<': lambda x, y: _cmp_operand(x) < _cmp_operand(y)  # type: ignore
 }
 
 
@@ -354,7 +370,7 @@ def rune_add_to_list(rune_list: list, value: Any) -> None:
         else:
             rune_list.append(value)
     else:
-        raise ValueError(
+        raise TypeError(
             "The rune_list for rune_add_to_list has to be an isntance of list "
             "and cannot be None.")
 
@@ -396,4 +412,5 @@ def rune_wrap_none(item):
     if item is None:
         return _NULLOBJECT
     return item
+
 # EOF

@@ -5,12 +5,13 @@ import json
 import logging
 from collections.abc import MutableSequence
 from decimal import Decimal
-from typing import Any, Literal, Self
+from typing import Any, Literal, Self, cast
 
 from pydantic import (
     BaseModel,
     ConfigDict,
     ModelWrapValidatorHandler,
+    TypeAdapter,
     ValidationError,
     model_serializer,
     model_validator,
@@ -27,10 +28,12 @@ from rune.runtime.metadata import (
     UnresolvedReference,
     _EnumWrapper,
 )
+from rune.runtime.reference_list import _ReferenceList
 
 logger = logging.getLogger(__name__)
 
 ROOT_CONTAINER = '__rune_root_metadata'
+_LIST_INDICES = TypeAdapter(list[int])
 
 
 class BaseDataClass(BaseModel, ComplexTypeMetaDataMixin):
@@ -51,6 +54,9 @@ class BaseDataClass(BaseModel, ComplexTypeMetaDataMixin):
         if isinstance(value, Reference):
             self._bind_property_to(name, value)
         else:
+            reference_list = self._prepare_reference_list(name, value, copy_existing=True)
+            if reference_list is not None:
+                value = reference_list
             # replace reference with an object
             if name in self._get_rune_refs_container():
                 self._remove_rune_ref(name)
@@ -64,6 +70,50 @@ class BaseDataClass(BaseModel, ComplexTypeMetaDataMixin):
             if isinstance(value, BaseMetaDataMixin):
                 value._set_rune_parent(self)  # type: ignore
             super().__setattr__(name, value)
+            if reference_list is not None:
+                for index, child in enumerate(reference_list):
+                    if (reference_list.reference_at(index) is None
+                            and isinstance(child, BaseMetaDataMixin)):
+                        child._set_rune_parent(self)
+                self.resolve_references(ignore_dangling=True, recurse=False)
+
+    def _prepare_reference_list(self, name: str, value: Any,
+                                 *, copy_existing: bool = False) -> _ReferenceList | None:
+        '''Prepare reference lists, copying existing storage when taking ownership.'''
+        unwrap = getattr(value, '_unwrap', None)
+        if callable(unwrap):
+            value = unwrap()
+        if isinstance(value, _ReferenceList):
+            for index, child in enumerate(value):
+                if reference := value.reference_at(index):
+                    self._check_reference(name, child, reference[1], child,
+                                          already_bound=True)
+                elif isinstance(child, Reference):
+                    self._check_reference(name, child.target, child.key_type, child)
+            return value.copy() if copy_existing else value
+        if not isinstance(value, (MutableSequence, tuple)):
+            return None
+        constraints = self._reference_constraints(name)
+        if (any(tag.startswith('@ref') for tag in constraints)
+                or any(isinstance(item, (Reference, UnresolvedReference)) for item in value)):
+            # A newly created wrapper already owns its storage.
+            return self._prepare_reference_list(name, _ReferenceList(value))
+        return None
+
+    def _contained_values(self):
+        '''Yield containment children, skipping scalar and list reference edges.'''
+        refs = self._get_rune_refs_container()
+        for name, value in self.__dict__.items():
+            if name.startswith('__') or name in refs:
+                continue
+            if isinstance(value, _ReferenceList):
+                for index, child in enumerate(value):
+                    if value.reference_at(index) is None:
+                        yield child
+            elif isinstance(value, (MutableSequence, tuple)):
+                yield from value
+            else:
+                yield value
 
     def __eq__(self, other: object) -> bool:
         if isinstance(other, BaseModel):
@@ -122,12 +172,79 @@ class BaseDataClass(BaseModel, ComplexTypeMetaDataMixin):
     @model_serializer(mode='wrap')
     def _serialize_refs(self, serializer, info):
         '''should replace objects with refs while serializing'''
-        res = serializer(self)
         refs = self._get_rune_refs_container()
+        updates = {}
+        list_fields = {}
+        for name in type(self).model_fields:
+            if name not in self.__dict__:
+                continue
+            if info.include is not None and name not in info.include:
+                continue
+            if (info.exclude is not None and name in info.exclude
+                    and (not isinstance(info.exclude, dict)
+                         or info.exclude[name] is True or info.exclude[name] is ...)):
+                continue
+            value = getattr(self, name)
+            if isinstance(value, _ReferenceList):
+                self._prepare_reference_list(name, value)
+                indices = self._serialized_list_indices(name, len(value), info)
+                selected = set(indices)
+                list_fields[name] = (value, indices)
+                updates[name] = [None if index not in selected or value.reference_at(index) else child
+                                 for index, child in enumerate(value)]
+                pending = (value[index] for index in indices)
+            else:
+                pending = (value,)
+                if name in refs and isinstance(value, BaseDataClass):
+                    # Avoid traversing the target before replacing it with @ref.
+                    updates[name] = type(value).model_construct()
+            if any(isinstance(child, (Reference, UnresolvedReference)) for child in pending):
+                raise ValueError(f'Unbound reference in {name!r}; '
+                                 'call resolve_references() before serialization')
+
+        projected = self.model_copy(update=updates) if updates else self
+        if updates:
+            object.__setattr__(projected, '__pydantic_fields_set__',
+                               self.__pydantic_fields_set__.copy())
+        res = serializer(projected)
         for property_nm, (key, ref_type) in refs.items():
-            res[property_nm] = {ref_type.rune_ref_tag: key}
+            output_name = self._serialized_field_name(property_nm, info)
+            if output_name in res:
+                res[output_name] = {ref_type.rune_ref_tag: key}
+        for name, (values, indices) in list_fields.items():
+            output_name = self._serialized_field_name(name, info)
+            if output_name not in res:
+                continue
+            written = res[output_name]
+            # Whole-list plain serializers bypass Pydantic's item selection.
+            if len(written) == len(values):
+                written = [written[index] for index in indices]
+            for position, index in enumerate(indices):
+                if reference := values.reference_at(index):
+                    key, key_type = reference
+                    written[position] = {key_type.rune_ref_tag: key}
+            res[output_name] = written
         res = self.__dict__.get(ROOT_CONTAINER, {}) | res
         return res
+
+    @staticmethod
+    def _serialized_list_indices(name: str, length: int, info) -> list[int]:
+        '''Map filtered output positions back to their original list indices.'''
+        include = info.include.get(name) if isinstance(info.include, dict) else None
+        exclude = info.exclude.get(name) if isinstance(info.exclude, dict) else None
+
+        if include is True or include is ...:
+            include = None
+        return _LIST_INDICES.dump_python(list(range(length)), include=include,
+                                         exclude=exclude)
+
+    def _serialized_field_name(self, name: str, info) -> str:
+        '''Use the same field alias as the wrapped Pydantic serializer.'''
+        by_alias = info.by_alias
+        if by_alias is None:
+            by_alias = self.model_config.get('serialize_by_alias', False)
+        field = type(self).model_fields[name]
+        return (field.serialization_alias or name) if by_alias else name
 
     @model_validator(mode='wrap')
     @classmethod
@@ -140,7 +257,25 @@ class BaseDataClass(BaseModel, ComplexTypeMetaDataMixin):
             if aux := cls._create_unresolved_ref(metadata):
                 return aux  # type: ignore
         obj = handler(data)
-        obj._init_rune_parent()  # pylint: disable=protected-access
+        # Pydantic instances have writable dictionaries; Pyright can infer the
+        # metaclass's MappingProxyType instead (microsoft/pyright#11548).
+        obj_state = cast(dict[str, Any], obj.__dict__)
+        # Pydantic may replace a list during revalidation. Keep occurrence
+        # metadata before wiring parents so reference targets are not reparented.
+        source = cls._unwrap_cow_validation_input(data)
+        for name in cls.model_fields:
+            original = source.get(name) if isinstance(source, dict) else getattr(source, name, None)
+            if isinstance(original, _ReferenceList):
+                obj_state[name] = original.with_values(getattr(obj, name))
+        if (isinstance(source, BaseDataClass)
+                and (original_refs := source._get_rune_refs_container())):
+            obj_state[REFS_CONTAINER] = dict(original_refs)
+        if isinstance(source, BaseDataClass) and source is not obj:
+            obj_state[RUNE_OBJ_MAPS] = {
+                key_type: dict(objects)
+                for key_type, objects in source.__dict__.get(RUNE_OBJ_MAPS, {}).items()
+            }
+        obj._init_rune_parent(source if isinstance(source, BaseDataClass) else None)
         if isinstance(data, dict):
             # Deferred annotations can bypass the field metadata validator.
             # Retain target keys before resolving references to this model.
@@ -151,27 +286,26 @@ class BaseDataClass(BaseModel, ComplexTypeMetaDataMixin):
                 obj.set_meta(check_allowed=False, **keys)
                 obj._register_keys(keys)  # pylint: disable=protected-access
         obj.resolve_references(ignore_dangling=True, recurse=False)
-        # transfer refs that were established on the original before
-        # re-validation wiped them
-        if (isinstance(data, BaseDataClass)
-                and not obj._get_rune_refs_container()
-                and (original_refs := data._get_rune_refs_container())):
-            obj.__dict__[REFS_CONTAINER] = dict(original_refs)  # type: ignore
         return obj
 
-    def _init_rune_parent(self):
+    def _init_rune_parent(self, original: 'BaseDataClass | None' = None):
         '''sets the rune parent in all properties'''
-        refs = self._get_rune_refs_container()
-        if not self.get_rune_parent() and RUNE_OBJ_MAPS not in self.__dict__:
-            self.__dict__[RUNE_OBJ_MAPS] = {}  # type: ignore
+        state = cast(dict[str, Any], self.__dict__)
+        if not self.get_rune_parent() and RUNE_OBJ_MAPS not in state:
+            state[RUNE_OBJ_MAPS] = {}
 
-        for prop_nm, obj in self.__dict__.items():
-            if prop_nm.startswith('__') or prop_nm in refs:
-                continue
-            children = obj if isinstance(obj, (MutableSequence, tuple)) else (obj,)
-            for child in children:
-                if isinstance(child, BaseMetaDataMixin):
-                    child._set_rune_parent(self)  # pylint: disable=protected-access
+        for name in type(self).model_fields:
+            values = self._prepare_reference_list(name, getattr(self, name))
+            if values is not None:
+                state[name] = values
+        original_children = {id(child) for child in original._contained_values()} if original else set()
+        for child in self._contained_values():
+            if isinstance(child, BaseMetaDataMixin):
+                # Field validators can retain existing instances on revalidation.
+                # Do not move those shared children out of the original graph.
+                if id(child) in original_children:
+                    continue
+                child._set_rune_parent(self)  # pylint: disable=protected-access
 
     def rune_serialize(
         self,
@@ -374,30 +508,30 @@ class BaseDataClass(BaseModel, ComplexTypeMetaDataMixin):
 
     def resolve_references(self, ignore_dangling=False, recurse=True):
         '''resolves all attributes which are references'''
+        # List mutations can introduce new containment children after construction.
+        for child in self._contained_values():
+            if (isinstance(child, BaseMetaDataMixin) and child is not self
+                    and child.get_rune_parent() is None):
+                child._set_rune_parent(self)
         if recurse:
-            resolved_refs = self._get_rune_refs_container()
-            for prop_nm, obj in self.__dict__.items():
-                # Follow containment only; resolved references can point back
-                # to an ancestor and must not be traversed again.
-                if prop_nm.startswith('__') or prop_nm in resolved_refs:
-                    continue
-                children = obj if isinstance(obj, (MutableSequence, tuple)) else (obj,)
-                for child in children:
-                    if isinstance(child, BaseDataClass):
-                        child.resolve_references(ignore_dangling=ignore_dangling,
-                                                 recurse=recurse)
+            for child in self._contained_values():
+                if isinstance(child, BaseDataClass):
+                    child.resolve_references(ignore_dangling=ignore_dangling,
+                                             recurse=recurse)
 
         refs = []
         for prop_nm, obj in self.__dict__.items():
-            if isinstance(obj, (UnresolvedReference, Reference)):
-                try:
-                    refs.append((prop_nm, obj.get_reference(self)))
-                except KeyError:
-                    if not ignore_dangling:
-                        raise
+            candidates = enumerate(obj) if isinstance(obj, _ReferenceList) else ((None, obj),)
+            for index, candidate in candidates:
+                if isinstance(candidate, (UnresolvedReference, Reference)):
+                    try:
+                        refs.append((prop_nm, index, candidate.get_reference(self)))
+                    except KeyError:
+                        if not ignore_dangling:
+                            raise
 
-        for prop_nm, ref in refs:
-            self._bind_property_to(prop_nm, ref)
+        for prop_nm, index, ref in refs:
+            self._bind_property_to(prop_nm, ref, index)
 
     def validate_model(self,
                        check_rune_constraints=True,
@@ -466,12 +600,9 @@ class BaseDataClass(BaseModel, ComplexTypeMetaDataMixin):
             else:
                 logger.info('Condition %s for %s satisfied.', name, self_rep)
         if recursively:
-            for k, v in self.__dict__.items():
-                if k.startswith('__'):  # ignore *all* private vars!
-                    continue
-                logger.info('Validating conditions of property %s', k)
+            for value in self._contained_values():
                 exceptions += _validate_conditions_recursively(
-                    v, raise_exc=raise_exc)
+                    value, raise_exc=raise_exc)
         err = f'with {len(exceptions)}' if exceptions else 'without'
         logger.info('Done conditions checking for %s %s errors.', self_rep, err)
         return exceptions

@@ -10,12 +10,22 @@ import json
 from enum import Enum
 from typing import Annotated, ClassVar, Optional
 
-from pydantic import ConfigDict, Field
+from pydantic import ConfigDict, Field, ValidationError
+from pydantic_core import PydanticSerializationError
 
 import pytest
 
 from rune.runtime.base_data_class import BaseDataClass
-from rune.runtime.metadata import BaseReference, EnumWithMetaMixin, StrWithMeta
+from rune.runtime.metadata import (
+    BaseReference,
+    EnumWithMetaMixin,
+    KeyType,
+    Reference,
+    StrWithMeta,
+    UnresolvedReference,
+)
+from rune.runtime.cow import rune_cow, rune_unwrap
+from rune.runtime.utils import rune_add_to_list
 
 NS = 'test_list_cardinality_serialise'
 
@@ -76,13 +86,29 @@ class Holder(BaseDataClass):
     model_config = ConfigDict(defer_build=True)
     _FQRTN: ClassVar[str] = f'{NS}.Holder'
     items: Annotated[Optional[list[Item | None]], Item.serializer(), Item.validator()] = Field(None, description='')
-    parties: Annotated[Optional[list[Party | None]], Party.serializer(), Party.validator(('@key', '@key:external'))] = Field(None, description='')
-    refs: Annotated[Optional[list[Party | BaseReference | None]], Party.serializer(), Party.validator(('@key', '@key:external', '@ref', '@ref:external'))] = Field(None, description='')
+    parties: Annotated[Optional[list[Party | None]], Party.serializer(), Party.validator(('@key', '@key:external', '@key:scoped'))] = Field(None, description='')
+    refs: Annotated[Optional[list[Party | BaseReference | None]], Party.serializer(), Party.validator(('@key', '@key:external', '@key:scoped', '@ref', '@ref:external', '@ref:scoped'))] = Field(None, description='')
     names: Annotated[Optional[list[StrWithMeta | None]], StrWithMeta.serializer(), StrWithMeta.validator(('@scheme', ))] = Field(None, description='')
     colours: Annotated[Optional[list[Colour | None]], Colour.serializer(), Colour.validator(('@scheme', ))] = Field(None, description='')
 
     _KEY_REF_CONSTRAINTS = {
-        'refs': {'@key', '@key:external', '@ref', '@ref:external'}
+        'refs': {'@key', '@key:external', '@ref', '@ref:external', '@ref:scoped'}
+    }
+
+
+class NestedHolder(BaseDataClass):
+    '''Reference lists can point to targets in a later sibling field.'''
+    holders: list[Holder]
+    parties: list[Annotated[Party, Party.serializer(), Party.validator(('@key:external',))]]
+
+
+class BasicReferenceHolder(BaseDataClass):
+    '''Primitive and enum lists use the same reference bookkeeping as objects.'''
+    names: Annotated[list[StrWithMeta | BaseReference], StrWithMeta.serializer(), StrWithMeta.validator(('@key', '@key:external', '@ref', '@ref:external'))] = Field(default_factory=list)
+    colours: Annotated[list[Colour | BaseReference], Colour.serializer(), Colour.validator(('@key', '@key:external', '@ref', '@ref:external'))] = Field(default_factory=list)
+    _KEY_REF_CONSTRAINTS = {
+        'names': {'@ref', '@ref:external'},
+        'colours': {'@ref', '@ref:external'},
     }
 
 
@@ -115,6 +141,23 @@ def test_write_absent_list():
     assert 'items' not in written
 
 
+def test_write_null_lists():
+    '''Pydantic skips the serializers for null whole-list values.'''
+    expected = dict.fromkeys(('items', 'parties', 'refs', 'names', 'colours'))
+    model = Holder(**expected)
+
+    assert model.model_dump() == expected
+    assert json.loads(model.model_dump_json()) == expected
+    assert model.model_dump(exclude_none=True) == {}
+
+
+def test_write_null_basic_list_item():
+    '''Direct recursion preserves null list items without invoking a serializer.'''
+    model = Holder(names=['x', None])
+
+    assert json.loads(model.rune_serialize())['names'] == [{'@data': 'x'}, None]
+
+
 def test_write_list_built_in_python():
     '''a list built in Python is written the same way'''
     written = json.loads(Holder(items=[Item(name='A')]).rune_serialize(validate_model=False))
@@ -128,9 +171,291 @@ def test_write_list_keeps_subtype():
     assert written.get('items') == [{'@type': f'{NS}.SpecialItem', 'name': 'A', 'extra': 'x'}]
 
 
-def test_write_list_of_unresolved_references():
-    '''a reference in a list is written back as the reference it was read as'''
-    data = {'parties': [{'@key:external': 'p1', 'name': 'A'}],
-            'refs': [{'@ref:external': 'p1'}]}
-    model = Holder.rune_deserialize(data, validate_model=False)
-    assert json.loads(model.rune_serialize(validate_model=False)).get('refs') == data['refs']
+@pytest.mark.parametrize('key_type', list(KeyType))
+def test_resolved_list_references_round_trip(key_type):
+    '''Resolve list entries before validation and preserve their reference tags.'''
+    data = {'parties': [{key_type.rune_key_tag: 'p1', 'name': 'A'}],
+            'refs': [{key_type.rune_ref_tag: 'p1'}]}
+
+    model = Holder.rune_deserialize(data)
+
+    assert model.refs[0] is model.parties[0]
+    assert model.resolve_ref_key('refs', 0) == 'p1'
+    model.resolve_references()
+    assert model.refs[0] is model.parties[0]
+    assert json.loads(model.rune_serialize())['refs'] == data['refs']
+
+
+def test_nested_forward_list_reference_preserves_parent():
+    '''Binding and revalidation must not turn reference edges into containment.'''
+    model = NestedHolder.rune_deserialize({
+        'holders': [{'refs': [{'@ref:external': 'p1'}, {'name': 'inline'}]}],
+        'parties': [{'@key:external': 'p1', 'name': 'A'}],
+    })
+
+    assert model.holders[0].refs[0] is model.parties[0]
+    assert model.parties[0].get_rune_parent() is model
+    assert model.holders[0].refs[1].get_rune_parent() is model.holders[0]
+    assert model.validate_model() == []
+    assert model.parties[0].get_rune_parent() is model
+    assert json.loads(model.rune_serialize())['holders'][0]['refs'] == [
+        {'@ref:external': 'p1'}, {'name': 'inline'},
+    ]
+
+
+def test_python_list_keeps_reference_and_inline_occurrences_distinct():
+    '''Two occurrences of the same target can have different serialization.'''
+    party = Party(name='A')
+    model = Holder(parties=[party], refs=[Reference(party, 'p1'), party])
+
+    assert model.refs[0] is model.refs[1] is party
+    assert json.loads(model.rune_serialize())['refs'] == [
+        {'@ref:external': 'p1'}, {'@key:external': 'p1', 'name': 'A'},
+    ]
+
+
+def test_unresolved_list_references_are_rejected():
+    '''Staged dangling references may be retained, but cannot be serialized.'''
+    model = Holder.model_validate({'refs': [{'@ref:external': 'missing'}]})
+    model.resolve_references(ignore_dangling=True)
+
+    assert isinstance(model.refs[0], UnresolvedReference)
+    with pytest.raises(KeyError, match='missing'):
+        model.resolve_references()
+    with pytest.raises(PydanticSerializationError, match='Unbound reference'):
+        model.rune_serialize(validate_model=False)
+    with pytest.raises(KeyError, match='missing'):
+        Holder.rune_deserialize({'refs': [{'@ref:external': 'missing'}]},
+                                validate_model=False)
+
+
+def test_excluded_unresolved_reference_does_not_block_serialization():
+    '''Only selected list entries must be serializable.'''
+    model = Holder.model_validate({
+        'refs': [{'@ref:external': 'missing'}, {'name': 'inline'}],
+    })
+
+    assert model.model_dump(include={'refs': {1}}) == {'refs': [{'name': 'inline'}]}
+    assert model.model_dump(exclude={'refs'}) == {
+        'items': None, 'parties': None, 'names': None, 'colours': None,
+    }
+
+
+def test_list_reference_checks_target_type_and_permissions():
+    '''Reference tokens cannot bypass the field's type or reference permissions.'''
+    class OtherParty(BaseDataClass):
+        _ALLOWED_METADATA = {'@key'}
+
+    class InternalHolder(Holder):
+        _KEY_REF_CONSTRAINTS = {'refs': {'@ref'}}
+
+    with pytest.raises(TypeError, match='Incompatible types'):
+        Holder(refs=[Reference(OtherParty())])
+    with pytest.raises(ValidationError, match='not allowed'):
+        InternalHolder(refs=[Reference(Party(name='A'), 'p1')])
+
+
+def test_reference_list_mutations_preserve_occurrence_metadata():
+    '''Ordinary list operations move metadata with the original occurrence.'''
+    party = Party(name='A')
+    model = Holder(parties=[party], refs=[Reference(party, 'p1'), party])
+
+    model.refs.reverse()
+    model.refs.insert(0, Party(name='B'))
+    del model.refs[0]
+    model.refs.extend(model.refs[-1:])
+    model.refs.sort(key=lambda item: item.name)
+    assert json.loads(model.rune_serialize())['refs'] == [
+        {'@key:external': 'p1', 'name': 'A'},
+        {'@ref:external': 'p1'}, {'@ref:external': 'p1'},
+    ]
+
+    model.refs[1] = party
+    assert model.resolve_ref_key('refs', 1) is None
+    assert json.loads(model.rune_serialize())['refs'][1] == {
+        '@key:external': 'p1', 'name': 'A',
+    }
+
+
+def test_reference_list_assignment_and_addition_preserve_metadata():
+    '''Assignment owns its list storage; slices and runtime additions keep intent.'''
+    party = Party(name='A')
+    incoming = [Reference(party, 'p1')]
+    model = Holder(parties=[party], refs=incoming)
+    incoming.clear()
+    model.refs = model.refs[:]
+    rune_add_to_list(model.refs, model.refs)
+    model.refs.append(Reference(party, 'p1'))
+
+    assert model.refs == [party, party, party]
+    assert json.loads(model.rune_serialize())['refs'] == [{'@ref:external': 'p1'}] * 3
+    model.refs = list(model.refs)
+    assert all(model.resolve_ref_key('refs', index) is None for index in range(3))
+
+
+def test_reference_list_repetition_and_slice_replacement():
+    '''Repetition, concatenation and slice replacement preserve each occurrence.'''
+    party = Party(name='A')
+    model = Holder(parties=[party], refs=[Reference(party, 'p1'), party])
+    model.refs *= 2
+    model.refs.pop(1)
+    model.refs[1:] = [] + model.refs[:1]
+    model.refs += model.refs[:1]
+
+    assert json.loads(model.rune_serialize())['refs'] == [{'@ref:external': 'p1'}] * 3
+    model.refs.clear()
+    assert json.loads(model.rune_serialize())['refs'] == []
+
+
+@pytest.mark.parametrize('operation', ['insert', 'pop', 'imul', 'mul', 'rmul'])
+def test_reference_list_accepts_index_protocol(operation):
+    '''Index-like arguments must keep values and occurrence metadata aligned.'''
+    class IndexValue:
+        def __init__(self, value):
+            self.value = value
+            self.calls = 0
+
+        def __index__(self):
+            # A second conversion would select a different position or count.
+            result = self.value + self.calls
+            self.calls += 1
+            return result
+
+    party = Party(name='A')
+    model = Holder(parties=[party], refs=[Reference(party, 'p1'), party])
+    reference = {'@ref:external': 'p1'}
+    inline = {'@key:external': 'p1', 'name': 'A'}
+    index = IndexValue(0 if operation in ('insert', 'pop') else 2)
+
+    if operation == 'insert':
+        model.refs.insert(index, party)
+        expected = [inline, reference, inline]
+    elif operation == 'pop':
+        assert model.refs.pop(index) is party
+        expected = [inline]
+    else:
+        if operation == 'imul':
+            model.refs *= index
+        elif operation == 'mul':
+            model.refs = model.refs * index
+        else:
+            model.refs = index * model.refs
+        expected = [reference, inline] * 2
+
+    assert index.calls == 1
+    assert json.loads(model.rune_serialize())['refs'] == expected
+
+
+@pytest.mark.parametrize('options, expected', [
+    ({'exclude': {'refs'}}, None),
+    ({'include': {'refs': {1}}}, [{'@ref:external': 'p1'}]),
+    ({'exclude': {'refs': {0}}}, [{'@ref:external': 'p1'}]),
+    ({'include': {'refs': {-1}}}, [{'@ref:external': 'p1'}]),
+    ({'exclude_none': True}, [{'name': 'inline'}, {'@ref:external': 'p1'}]),
+])
+def test_list_reference_serialization_options(options, expected):
+    '''Output filtering must retain the reference intent of the selected positions.'''
+    party = Party(name='A')
+    model = Holder(parties=[party], refs=[Party(name='inline'), Reference(party, 'p1')])
+
+    assert json.loads(model.rune_serialize(**options)).get('refs') == expected
+
+
+def test_list_references_survive_copy_and_cow():
+    '''Copying and mutating a COW list must not change the source metadata.'''
+    party = Party(name='A')
+    model = Holder(parties=[party], refs=[Reference(party, 'p1')])
+    clone = model.model_copy(deep=True)
+
+    assert clone.refs[0] is clone.parties[0]
+    assert clone.refs[0] is not party
+    assert json.loads(clone.rune_serialize())['refs'] == [{'@ref:external': 'p1'}]
+
+    draft = rune_cow(model)
+    draft.refs.append(Party(name='B'))
+    written = json.loads(rune_unwrap(draft).rune_serialize())
+    assert written['refs'] == [{'@ref:external': 'p1'}, {'name': 'B'}]
+    assert len(model.refs) == 1
+    assert json.loads(model.rune_serialize())['refs'] == [{'@ref:external': 'p1'}]
+
+
+def test_cow_target_edit_preserves_reference_occurrence():
+    '''An internal COW child update retains reference intent and isolates the source.'''
+    party = Party(name='A')
+    model = Holder(parties=[party], refs=[Reference(party, 'p1')])
+    draft = rune_cow(model)
+
+    draft.refs[0].name = 'B'
+
+    assert party.name == 'A'
+    assert rune_unwrap(draft).refs[0].name == 'B'
+    assert rune_unwrap(draft).refs[0] is rune_unwrap(draft).parties[0]
+    assert json.loads(rune_unwrap(draft).rune_serialize())['refs'] == [{'@ref:external': 'p1'}]
+
+
+@pytest.mark.parametrize('attribute, value', [('names', 'A'), ('colours', 'Red')])
+def test_basic_and_enum_reference_lists_round_trip(attribute, value):
+    '''Reference entries are resolved before the basic or enum serializer runs.'''
+    data = {attribute: [
+        {'@key:external': 'target', '@data': value},
+        {'@ref:external': 'target'},
+    ]}
+
+    model = BasicReferenceHolder.rune_deserialize(data)
+
+    values = getattr(model, attribute)
+    assert values[0] is values[1]
+    assert model.model_dump(mode='json', exclude_unset=True) == data
+    assert json.loads(model.rune_serialize())[attribute] == data[attribute]
+
+
+def test_inherited_list_reference_constraints_and_overrides():
+    '''New subclass constraints do not hide inherited fields' permissions.'''
+    class ExtendedHolder(Holder):
+        _KEY_REF_CONSTRAINTS = {'other': {'@ref'}}
+
+    class OverriddenHolder(Holder):
+        refs: list[Party | BaseReference]
+        _KEY_REF_CONSTRAINTS = {}
+
+    party = Party(name='A')
+    model = ExtendedHolder(parties=[party], refs=[Reference(party, 'p1')])
+    assert model.refs[0] is party
+    assert json.loads(model.rune_serialize())['refs'] == [{'@ref:external': 'p1'}]
+
+    with pytest.raises(ValidationError, match='not allowed'):
+        OverriddenHolder(parties=[party], refs=model.refs)
+
+
+def test_list_reference_cycles_are_not_traversed():
+    '''A list reference to its owner is neither containment nor embedded JSON.'''
+    class CyclicHolder(BaseDataClass):
+        _ALLOWED_METADATA = {'@key'}
+        refs: Annotated[list[BaseDataClass | BaseReference], BaseDataClass.serializer(), BaseDataClass.validator(('@ref',))]
+        _KEY_REF_CONSTRAINTS = {'refs': {'@ref'}}
+
+    model = CyclicHolder(refs=[])
+    model.refs = [Reference(model)]
+    model.resolve_references()
+    model.resolve_references()
+
+    assert model.refs[0] is model
+    assert model.get_rune_parent() is None
+    assert json.loads(model.rune_serialize())['refs'] == [{'@ref': model.get_meta('key')}]
+
+
+def test_list_reference_aliases_and_bare_list_schema():
+    '''Aliased fields with ordinary Pydantic list schemas retain their references.'''
+    class BareHolder(BaseDataClass):
+        parties: list[Party]
+        refs: list[Party | BaseReference] = Field(serialization_alias='references')
+        _KEY_REF_CONSTRAINTS = {'refs': {'@ref:external'}}
+
+    model = BareHolder.rune_deserialize({
+        'parties': [{'@key:external': 'p1', 'name': 'A'}],
+        'refs': [{'@ref:external': 'p1'}],
+    })
+
+    assert model.refs[0] is model.parties[0]
+    assert model.model_dump(by_alias=True)['references'] == [{'@ref:external': 'p1'}]
+    assert model.model_dump(exclude={'refs'}) == {'parties': [{'name': 'A'}]}

@@ -20,6 +20,8 @@ from pydantic import (
 )
 from pydantic_core import PydanticCustomError
 
+from rune.runtime.reference_list import _ReferenceList
+
 # from rune.runtime.object_registry import get_object
 
 DEFAULT_META = '_ALLOWED_METADATA'
@@ -261,10 +263,14 @@ class BaseMetaDataMixin:
         '''the parent object'''
         return self.__dict__.get(PARENT_PROP)
 
-    def resolve_ref_key(self, property_name: str) -> Any:
-        ''' if the property exists and it is a reference, return the reference,
-            otherwise return None
-        '''
+    def resolve_ref_key(self, property_name: str, index: int | None = None) -> Any:
+        '''Return a scalar reference key, or the key at a given list index.'''
+        if index is not None:
+            values = getattr(self, property_name, None)
+            if isinstance(values, _ReferenceList):
+                ref = values.reference_at(index)
+                return ref[0] if ref else None
+            return None
         refs = self._get_rune_refs_container()
         return refs.get(property_name, [None])[0]
 
@@ -298,38 +304,68 @@ class BaseMetaDataMixin:
                              f'currently existing meta slots: {current_meta}')
         meta |= {k: None for k in allowed_meta - current_meta}
 
-    def _bind_property_to(self, property_nm: str, ref: Reference):
-        '''set the property to reference the object referenced by the key'''
-        old_val = getattr(self, property_nm)
-        allowed_ref_types = getattr(self, '_KEY_REF_CONSTRAINTS', {})
-        if (ref.key_type.rune_ref_tag not in allowed_ref_types.get(
-                property_nm, {})):  # and not _replaceable(old_val)):
-            raise ValueError(f'Ref of type {ref.key_type} '
+    def _reference_constraints(self, property_nm: str) -> set[str]:
+        '''Find inherited constraints while honoring explicit constraint overrides.'''
+        for base in type(self).__mro__:
+            constraints = base.__dict__.get('_KEY_REF_CONSTRAINTS', {})
+            owns_constraints = '_KEY_REF_CONSTRAINTS' in base.__dict__
+            private = base.__dict__.get('__private_attributes__', {}).get('_KEY_REF_CONSTRAINTS')
+            if private is not None and not any(
+                    private is getattr(parent, '__private_attributes__', {}).get('_KEY_REF_CONSTRAINTS')
+                    for parent in base.__bases__):
+                constraints = private.default
+                owns_constraints = True
+            if property_nm in constraints:
+                return set(constraints[property_nm])
+            if owns_constraints and property_nm in getattr(base, '__annotations__', {}):
+                return set()
+        return set()
+
+    def _check_reference(self, property_nm: str, target: Any, key_type: KeyType,
+                         old_val: Any, already_bound: bool = False) -> None:
+        '''Check field permissions and target type before binding an occurrence.'''
+        allowed_ref_types = self._reference_constraints(property_nm)
+        if key_type.rune_ref_tag not in allowed_ref_types:
+            raise ValueError(f'Ref of type {key_type} '
                              f'not allowed for {property_nm}. Allowed types '
-                             f'are: {allowed_ref_types.get(property_nm, {})}')
+                             f'are: {allowed_ref_types}')
 
         # Pydantic includes inherited fields and resolves their annotations.
         field_type = type(self).model_fields[property_nm].annotation  # type: ignore
         allowed_type = _get_basic_type(field_type)
+        typed_target = target.enum_instance if isinstance(target, _EnumWrapper) else target
         if not (isinstance(allowed_type, str)
-                or isinstance(ref.target, allowed_type)):
+                or isinstance(typed_target, allowed_type)):
             raise TypeError("Can't set reference. Incompatible types: "
                             f"expected {allowed_type}, "
-                            f"got {ref.target.__class__}")
+                            f"got {target.__class__}")
 
-        refs = self.__dict__.setdefault(REFS_CONTAINER, {})
-        if property_nm not in refs:
+        if not already_bound:
             # not a reference - check if allowed to replace with one
             if not _replaceable(old_val):
                 raise ValueError(f'Property {property_nm} of type '
                                  f"{type(old_val)} can't be a reference")
             # pylint: disable=protected-access
             if isinstance(old_val, BaseMetaDataMixin):
-                old_val._check_props_allowed({ref.key_type.rune_ref_tag: ''})
+                old_val._check_props_allowed({key_type.rune_ref_tag: ''})
 
-        # setattr(self, property_nm, ref.target)  # nope - need to avoid here!
-        self.__dict__[property_nm] = ref.target  # NOTE: avoid here setattr
-        refs[property_nm] = (ref.target_key, ref.key_type)
+    def _bind_property_to(self, property_nm: str, ref: Reference,
+                          index: int | None = None):
+        '''Set a scalar field or list occurrence to a reference target.'''
+        values = getattr(self, property_nm)
+        old_val = values if index is None else values[index]
+        already_bound = (property_nm in self._get_rune_refs_container()
+                         if index is None else values.reference_at(index) is not None)
+        self._check_reference(property_nm, ref.target, ref.key_type,
+                              old_val, already_bound)
+
+        if index is None:
+            self.__dict__[property_nm] = ref.target  # NOTE: avoid here setattr
+            refs = self.__dict__.setdefault(REFS_CONTAINER, {})
+            refs[property_nm] = (ref.target_key, ref.key_type)
+        else:
+            getattr(self, property_nm).bind(index, ref.target, ref.target_key,
+                                           ref.key_type)
 
     def _register_keys(self, metadata):
         keys = {
@@ -434,17 +470,11 @@ class ComplexTypeMetaDataMixin(BaseMetaDataMixin):
         return cls  # support for legacy json
 
     @classmethod
-    def serialise(cls, obj) -> dict | list | None:
+    def serialise(cls, obj) -> dict | list:
         '''used as serialisation method with pydantic'''
         # The serializer of a multi-cardinality field wraps the whole list
         if isinstance(obj, list):
-            return [cls.serialise(item) for item in obj]
-        if obj is None:
-            return None
-        if isinstance(obj, UnresolvedReference):
-            return {obj.key_type.rune_ref_tag: obj.key}
-        if isinstance(obj, Reference):
-            return {obj.key_type.rune_ref_tag: obj.target_key}
+            return [None if item is None else cls.serialise(item) for item in obj]
         res = obj.serialise_meta()
         res |= obj.model_dump(exclude_unset=True, exclude_defaults=True)
         if cls != obj.__class__:
@@ -458,7 +488,8 @@ class ComplexTypeMetaDataMixin(BaseMetaDataMixin):
         '''method used as pydantic `validator`'''
         obj = _unwrap_cow_proxy(obj)
         if isinstance(obj, list):
-            return [cls.deserialize(item, allowed_meta) for item in obj]
+            processed = [cls.deserialize(item, allowed_meta) for item in obj]
+            return obj.with_values(processed) if isinstance(obj, _ReferenceList) else processed
 
         if isinstance(obj, cls):
             if cls.meta_checks_enabled():
@@ -498,7 +529,8 @@ class ComplexTypeMetaDataMixin(BaseMetaDataMixin):
     @lru_cache
     def serializer(cls):
         '''should return the validator for the specific class'''
-        return PlainSerializer(cls.serialise, return_type=Any)
+        return PlainSerializer(cls.serialise, return_type=Any,
+                               when_used='unless-none')
 
     @classmethod
     @lru_cache
@@ -528,13 +560,12 @@ class BasicTypeMetaDataMixin(BaseMetaDataMixin):
                             f' however the value is of type {type(value)}')
 
     @classmethod
-    def serialise(cls, obj, base_type) -> dict | list | None:
+    def serialise(cls, obj, base_type) -> dict | list:
         '''used as serialisation method with pydantic'''
         # The serializer of a multi-cardinality field wraps the whole list
         if isinstance(obj, list):
-            return [cls.serialise(item, base_type) for item in obj]
-        if obj is None:
-            return None
+            return [None if item is None else cls.serialise(item, base_type)
+                    for item in obj]
         res = obj.serialise_meta()
         res['@data'] = base_type(obj)
         return res
@@ -545,10 +576,13 @@ class BasicTypeMetaDataMixin(BaseMetaDataMixin):
         obj = _unwrap_cow_proxy(obj)
         if obj is None:
             return handler(None)
+        if isinstance(obj, Reference):
+            return obj
         if isinstance(obj, list):
             identity = lambda x: x
             processed = [cls.deserialize(item, identity, base_types, allowed_meta) for item in obj]
-            return handler(processed)
+            processed = handler(processed)
+            return obj.with_values(processed) if isinstance(obj, _ReferenceList) else processed
         model = obj
         if isinstance(obj, base_types) and not isinstance(obj, cls):
             model = cls(obj)  # type: ignore
@@ -568,7 +602,8 @@ class BasicTypeMetaDataMixin(BaseMetaDataMixin):
     def serializer(cls):
         '''should return the validator for the specific class'''
         ser_fn = partial(cls.serialise, base_type=cls._OUTPUT_TYPE)
-        return PlainSerializer(ser_fn, return_type=Any)
+        return PlainSerializer(ser_fn, return_type=Any,
+                               when_used='unless-none')
 
     @classmethod
     @lru_cache
@@ -735,7 +770,7 @@ class _EnumWrapper(BaseMetaDataMixin):
 class EnumWithMetaMixin:
     '''holds the metadata associated with a Rune Enum'''
     @classmethod
-    def serialise(cls, obj, handler) -> dict | list | None:
+    def serialise(cls, obj, handler) -> dict | list:
         '''used as serialisation method with pydantic'''
         # The serializer of a multi-cardinality field wraps the whole list,
         # so the handler, which serializes the list's type, can't be used
@@ -744,8 +779,6 @@ class EnumWithMetaMixin:
             return [None if item is None
                     else item.serialise_meta() | {'@data': item.enum_instance.value}
                     for item in obj]
-        if obj is None:
-            return None
         res = obj.serialise_meta()
         res['@data'] = handler(obj.enum_instance)
         return res
@@ -754,8 +787,11 @@ class EnumWithMetaMixin:
     def deserialize(cls, obj, allowed_meta: set[str]):
         '''method used as pydantic `validator`'''
         obj = _unwrap_cow_proxy(obj)
+        if isinstance(obj, Reference):
+            return obj
         if isinstance(obj, list):
-            return [cls.deserialize(item, allowed_meta) for item in obj]
+            processed = [cls.deserialize(item, allowed_meta) for item in obj]
+            return obj.with_values(processed) if isinstance(obj, _ReferenceList) else processed
         model = obj
         if (isinstance(obj, str)
                 and not isinstance(obj, _EnumWrapper)):
