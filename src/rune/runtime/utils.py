@@ -367,18 +367,21 @@ def rune_filter(items, filter_func):
 
 
 def rune_sorted(values: Iterable[Any], *, key: Callable[[Any], Any] | None = None,
-                reverse: bool = False) -> list[Any]:
+                reverse: bool = False, skip_none: bool = False) -> list[Any]:
     '''Return a stable, shallow sorted copy, preserving reference occurrences.
 
     Reference lists retain their metadata. Other iterables produce a plain list.
     COW inputs retain their item proxies, so subsequent object edits still use
     copy-on-write. Sorting does not change the input collection's order.
+    With skip_none=True, None entries are removed before evaluating the key.
     '''
     current = rune_unwrap_proxy(values)
     if isinstance(current, _ReferenceList):
         result = current.copy() if current is values else current.with_values(values)
+        if skip_none:
+            result.remove_none()
     else:
-        result = list(values)
+        result = [value for value in values if value is not None] if skip_none else list(values)
     result.sort(key=key, reverse=reverse)
     return result
 

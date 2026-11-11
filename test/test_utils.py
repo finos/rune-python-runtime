@@ -99,6 +99,47 @@ def test_rune_sorted_preserves_equal_key_order():
     assert rune_sorted([]) == []
 
 
+@pytest.mark.parametrize('make_values', [list, tuple, iter, rune_cow])
+@pytest.mark.parametrize('reverse', [False, True])
+def test_rune_sorted_skip_none_accepts_iterables_and_preserves_falsey_values(make_values, reverse):
+    '''Skip only None entries, without changing the original collection.'''
+    source = [None, 3, None, False, 2, 0, None]
+    expected = [3, 2, False, 0] if reverse else [False, 0, 2, 3]
+
+    result = rune_sorted(make_values(source), reverse=reverse, skip_none=True)
+
+    assert type(result) is list
+    assert len(result) == len(expected)
+    assert all(actual is wanted for actual, wanted in zip(result, expected))
+    assert source == [None, 3, None, False, 2, 0, None]
+
+
+def test_rune_sorted_skip_none_filters_before_evaluating_key():
+    '''The key sees each remaining item once, including empty strings.'''
+    seen = []
+
+    def sort_key(value):
+        assert value is not None
+        seen.append(value)
+        return value.lower()
+
+    assert rune_sorted([None, 'B', '', None, 'a'], key=sort_key, skip_none=True) == ['', 'a', 'B']
+    assert seen == ['B', '', 'a']
+
+
+@pytest.mark.parametrize('values', [[], [None], [None, None]])
+def test_rune_sorted_skip_none_returns_empty_list_when_no_values_remain(values):
+    assert rune_sorted(values, skip_none=True) == []
+
+
+@pytest.mark.parametrize('options', [{}, {'skip_none': False}])
+def test_rune_sorted_preserves_none_unless_requested(options):
+    '''The default retains None entries for a key that supports them.'''
+    result = rune_sorted([2, None, 1], key=lambda value: (value is None, value), **options)
+
+    assert result == [1, 2, None]
+
+
 class _UncheckedChild(BaseDataClass):
     x: int
 

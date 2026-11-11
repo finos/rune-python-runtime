@@ -129,6 +129,17 @@ class _ReferenceList(list):
         super().clear()
         self._references.clear()
 
+    def remove_none(self) -> None:
+        '''Remove None entries while preserving occurrence metadata.'''
+        values = []
+        references = []
+        for value, reference in zip(self, self._references):
+            if value is not None:
+                values.append(value)
+                references.append(reference)
+        super().__setitem__(slice(None), values)
+        self._references = references
+
     def reverse(self) -> None:
         '''Reverse values and their reference metadata together.'''
         super().reverse()

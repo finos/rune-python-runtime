@@ -277,14 +277,19 @@ def test_reference_list_mutations_preserve_occurrence_metadata():
 
 
 @pytest.mark.parametrize('reverse', [False, True])
-def test_rune_sorted_preserves_reference_occurrences_and_input_order(reverse):
+@pytest.mark.parametrize('skip_none', [False, True])
+def test_rune_sorted_preserves_reference_occurrences_and_input_order(reverse, skip_none):
     '''Sort a copy while retaining distinct inline/reference occurrences of one target.'''
     first = Party(name='A')
     second = Party(name='B')
     model = Holder(parties=[first, second], refs=[Reference(second, 'p-b'), first, Reference(first, 'p-a')])
-    before = json.loads(model.rune_serialize())['refs']
+    if skip_none:
+        model.refs.insert(0, None)
+        model.refs.insert(2, None)
+        model.refs.append(None)
+    before = json.loads(model.rune_serialize(validate_model=False))['refs']
 
-    result = rune_sorted(model.refs, key=lambda party: party.name, reverse=reverse)
+    result = rune_sorted(model.refs, key=lambda party: party.name, reverse=reverse, skip_none=skip_none)
 
     assert type(result) is type(model.refs)
     assert result is not model.refs
@@ -297,9 +302,9 @@ def test_rune_sorted_preserves_reference_occurrences_and_input_order(reverse):
     expected = [ascending[2], ascending[0], ascending[1]] if reverse else ascending
     sorted_model = model.model_copy(update={'refs': result})
     assert json.loads(sorted_model.rune_serialize())['refs'] == expected
-    assert json.loads(model.rune_serialize())['refs'] == before
+    assert json.loads(model.rune_serialize(validate_model=False))['refs'] == before
     result.pop()
-    assert len(model.refs) == 3
+    assert len(model.refs) == (6 if skip_none else 3)
 
 
 def test_rune_sorted_key_error_keeps_source_reference_metadata():
@@ -320,28 +325,47 @@ def test_rune_sorted_key_error_keeps_source_reference_metadata():
 
 
 @pytest.mark.parametrize('mutate_draft', [False, True])
-def test_rune_sorted_cow_list_preserves_metadata_and_object_isolation(mutate_draft):
+@pytest.mark.parametrize('skip_none', [False, True])
+def test_rune_sorted_cow_list_preserves_metadata_and_object_isolation(mutate_draft, skip_none):
     '''Sorted COW results keep proxies and reference flags from the current list.'''
     first = Party(name='A')
     second = Party(name='B')
     model = Holder(parties=[first, second], refs=[Reference(second, 'p-b'), first, Reference(first, 'p-a')])
+    if skip_none:
+        model.refs.insert(0, None)
+        model.refs.insert(2, None)
+        model.refs.append(None)
     draft = rune_cow(model)
     if mutate_draft:
         draft.refs.append(Party(name='C'))
 
-    result = rune_sorted(draft.refs, key=lambda party: party.name)
+    result = rune_sorted(draft.refs, key=lambda party: party.name, skip_none=skip_none)
 
     assert type(result) is type(model.refs)
     assert result.reference_at(0) is None
     assert result.reference_at(1) == ('p-a', KeyType.EXTERNAL)
     assert result.reference_at(2) == ('p-b', KeyType.EXTERNAL)
-    assert [party.name for party in draft.refs] == ['B', 'A', 'A'] + (['C'] if mutate_draft else [])
+    expected = [None, 'B', None, 'A', 'A', None] if skip_none else ['B', 'A', 'A']
+    assert [party.name if party is not None else None for party in draft.refs] == expected + (['C'] if mutate_draft else [])
     result[1].name = 'Edited'
     unwrapped = rune_unwrap(result)
     assert unwrapped[1].name == 'Edited'
     assert unwrapped.reference_at(1) == ('p-a', KeyType.EXTERNAL)
     assert first.name == 'A'
-    assert len(model.refs) == 3
+    assert len(model.refs) == (6 if skip_none else 3)
+
+
+def test_rune_sorted_skip_none_keeps_reference_list_type_when_empty():
+    '''Removing every entry still produces an independent reference list.'''
+    model = Holder(refs=[])
+    model.refs.extend([None, None])
+
+    result = rune_sorted(model.refs, skip_none=True)
+
+    assert type(result) is type(model.refs)
+    assert result == []
+    assert list(result.reference_items()) == []
+    assert model.refs == [None, None]
 
 
 def test_reference_list_assignment_and_addition_preserve_metadata():
