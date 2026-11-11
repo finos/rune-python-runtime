@@ -18,7 +18,53 @@ from rune.runtime.utils import (
     rune_check_one_of,
     rune_flatten_list,
     rune_get_only_element,
+    rune_sorted,
+    rune_unwrap_proxy,
 )
+
+
+class _UnwrapProxy:
+    '''A generic hook provider with no dependency on the COW implementation.'''
+    def __init__(self, value):
+        self.value = value
+
+    def _unwrap(self):
+        return self.value
+
+
+@pytest.mark.parametrize('value', [None, False, 0, '', [], {}])
+def test_rune_unwrap_proxy_preserves_ordinary_value_identity(value):
+    '''Ordinary and falsey values are returned without copying or conversion.'''
+    assert rune_unwrap_proxy(value) is value
+
+
+def test_rune_unwrap_proxy_calls_generic_hook_once_without_traversing_values():
+    '''Only the outer hook is called, even when its result contains more proxies.'''
+    inner = _UnwrapProxy('inner')
+    nested = [inner]
+
+    assert rune_unwrap_proxy(_UnwrapProxy(inner)) is inner
+    assert rune_unwrap_proxy(_UnwrapProxy(nested)) is nested
+    assert nested[0] is inner
+
+
+def test_rune_unwrap_proxy_ignores_noncallable_hook():
+    '''An attribute named _unwrap is insufficient unless it is callable.'''
+    class Value:
+        _unwrap = 42
+
+    value = Value()
+    assert rune_unwrap_proxy(value) is value
+
+
+def test_rune_unwrap_proxy_propagates_hook_errors():
+    '''A hook failure must not be hidden by returning the original value.'''
+    class BrokenProxy:
+        def _unwrap(self):
+            raise RuntimeError('unwrap failed')
+
+    with pytest.raises(RuntimeError, match='unwrap failed'):
+        rune_unwrap_proxy(BrokenProxy())
 
 
 @pytest.mark.parametrize('destination', [None, (), {}])
@@ -26,6 +72,31 @@ def test_rune_add_to_list_rejects_invalid_destinations_with_type_error(destinati
     '''Generated add operations report an invalid destination as a type error.'''
     with pytest.raises(TypeError, match='rune_add_to_list'):
         rune_add_to_list(destination, 1)
+
+
+@pytest.mark.parametrize('make_values', [list, tuple, iter, rune_cow])
+@pytest.mark.parametrize('reverse', [False, True])
+def test_rune_sorted_accepts_iterables_without_mutating_input(make_values, reverse):
+    '''Plain iterables, including COW lists, produce independent sorted lists.'''
+    source = [3, 1, 2]
+
+    result = rune_sorted(make_values(source), reverse=reverse)
+
+    assert type(result) is list
+    assert result == sorted(source, reverse=reverse)
+    assert source == [3, 1, 2]
+    result.clear()
+    assert source == [3, 1, 2]
+
+
+def test_rune_sorted_preserves_equal_key_order():
+    '''A custom key keeps the relative order of equal-key values.'''
+    source = [('B', 0), ('A', 1), ('A', 2)]
+
+    assert rune_sorted(source, key=lambda item: item[0]) == [
+        ('A', 1), ('A', 2), ('B', 0),
+    ]
+    assert rune_sorted([]) == []
 
 
 class _UncheckedChild(BaseDataClass):

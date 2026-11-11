@@ -21,6 +21,7 @@ from pydantic import (
 from pydantic_core import PydanticCustomError
 
 from rune.runtime.reference_list import _ReferenceList
+from rune.runtime.utils import rune_unwrap_proxy
 
 # from rune.runtime.object_registry import get_object
 
@@ -46,14 +47,6 @@ def _get_basic_type(annotated_type):
     if embedded_type:
         return _get_basic_type(embedded_type[0])
     return annotated_type
-
-
-def _unwrap_cow_proxy(value: Any) -> Any:
-    '''Return the current value behind a copy-on-write proxy, if present.'''
-    unwrap = getattr(value, '_unwrap', None)
-    if callable(unwrap):
-        return unwrap()
-    return value
 
 
 class KeyType(Enum):
@@ -111,8 +104,8 @@ class Reference(BaseReference):
                  ext_key: str | None = None,
                  key_type: KeyType | None = None,
                  parent=None):
-        target = _unwrap_cow_proxy(target)
-        parent = _unwrap_cow_proxy(parent)
+        target = rune_unwrap_proxy(target)
+        parent = rune_unwrap_proxy(parent)
         if not isinstance(target, BaseMetaDataMixin) and ext_key:
             raise ValueError('Need to pass an object as target when specifying '
                              'an external key!')
@@ -488,7 +481,7 @@ class ComplexTypeMetaDataMixin(BaseMetaDataMixin):
     @classmethod
     def deserialize(cls, obj, allowed_meta: set[str]):
         '''method used as pydantic `validator`'''
-        obj = _unwrap_cow_proxy(obj)
+        obj = rune_unwrap_proxy(obj)
         if isinstance(obj, list):
             processed = [cls.deserialize(item, allowed_meta) for item in obj]
             return obj.with_values(processed) if isinstance(obj, _ReferenceList) else processed
@@ -575,7 +568,7 @@ class BasicTypeMetaDataMixin(BaseMetaDataMixin):
     @classmethod
     def deserialize(cls, obj, handler, base_types, allowed_meta: set[str]):
         '''method used as pydantic `validator`'''
-        obj = _unwrap_cow_proxy(obj)
+        obj = rune_unwrap_proxy(obj)
         if obj is None:
             return handler(None)
         if isinstance(obj, Reference):
@@ -788,7 +781,7 @@ class EnumWithMetaMixin:
     @classmethod
     def deserialize(cls, obj, allowed_meta: set[str]):
         '''method used as pydantic `validator`'''
-        obj = _unwrap_cow_proxy(obj)
+        obj = rune_unwrap_proxy(obj)
         if isinstance(obj, Reference):
             return obj
         if isinstance(obj, list):

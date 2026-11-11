@@ -10,12 +10,12 @@ import json
 from enum import Enum
 from typing import Annotated, ClassVar, Optional
 
+import pytest
 from pydantic import ConfigDict, Field, ValidationError
 from pydantic_core import PydanticSerializationError
 
-import pytest
-
 from rune.runtime.base_data_class import BaseDataClass
+from rune.runtime.cow import rune_cow, rune_unwrap
 from rune.runtime.metadata import (
     BaseReference,
     EnumWithMetaMixin,
@@ -24,8 +24,7 @@ from rune.runtime.metadata import (
     StrWithMeta,
     UnresolvedReference,
 )
-from rune.runtime.cow import rune_cow, rune_unwrap
-from rune.runtime.utils import rune_add_to_list
+from rune.runtime.utils import rune_add_to_list, rune_sorted
 
 NS = 'test_list_cardinality_serialise'
 
@@ -275,6 +274,74 @@ def test_reference_list_mutations_preserve_occurrence_metadata():
     assert json.loads(model.rune_serialize())['refs'][1] == {
         '@key:external': 'p1', 'name': 'A',
     }
+
+
+@pytest.mark.parametrize('reverse', [False, True])
+def test_rune_sorted_preserves_reference_occurrences_and_input_order(reverse):
+    '''Sort a copy while retaining distinct inline/reference occurrences of one target.'''
+    first = Party(name='A')
+    second = Party(name='B')
+    model = Holder(parties=[first, second], refs=[Reference(second, 'p-b'), first, Reference(first, 'p-a')])
+    before = json.loads(model.rune_serialize())['refs']
+
+    result = rune_sorted(model.refs, key=lambda party: party.name, reverse=reverse)
+
+    assert type(result) is type(model.refs)
+    assert result is not model.refs
+    assert result[1 if reverse else 0] is first
+    ascending = [
+        {'@key:external': 'p-a', 'name': 'A'},
+        {'@ref:external': 'p-a'},
+        {'@ref:external': 'p-b'},
+    ]
+    expected = [ascending[2], ascending[0], ascending[1]] if reverse else ascending
+    sorted_model = model.model_copy(update={'refs': result})
+    assert json.loads(sorted_model.rune_serialize())['refs'] == expected
+    assert json.loads(model.rune_serialize())['refs'] == before
+    result.pop()
+    assert len(model.refs) == 3
+
+
+def test_rune_sorted_key_error_keeps_source_reference_metadata():
+    '''A failing key function does not change the input collection or its intent.'''
+    party = Party(name='A')
+    model = Holder(refs=[Reference(party, 'p1'), party])
+
+    def failing_key(_):
+        raise ValueError('cannot sort')
+
+    with pytest.raises(ValueError, match='cannot sort'):
+        rune_sorted(model.refs, key=failing_key)
+
+    assert model.refs[0] is model.refs[1] is party
+    assert json.loads(model.rune_serialize())['refs'] == [
+        {'@ref:external': 'p1'}, {'@key:external': 'p1', 'name': 'A'},
+    ]
+
+
+@pytest.mark.parametrize('mutate_draft', [False, True])
+def test_rune_sorted_cow_list_preserves_metadata_and_object_isolation(mutate_draft):
+    '''Sorted COW results keep proxies and reference flags from the current list.'''
+    first = Party(name='A')
+    second = Party(name='B')
+    model = Holder(parties=[first, second], refs=[Reference(second, 'p-b'), first, Reference(first, 'p-a')])
+    draft = rune_cow(model)
+    if mutate_draft:
+        draft.refs.append(Party(name='C'))
+
+    result = rune_sorted(draft.refs, key=lambda party: party.name)
+
+    assert type(result) is type(model.refs)
+    assert result.reference_at(0) is None
+    assert result.reference_at(1) == ('p-a', KeyType.EXTERNAL)
+    assert result.reference_at(2) == ('p-b', KeyType.EXTERNAL)
+    assert [party.name for party in draft.refs] == ['B', 'A', 'A'] + (['C'] if mutate_draft else [])
+    result[1].name = 'Edited'
+    unwrapped = rune_unwrap(result)
+    assert unwrapped[1].name == 'Edited'
+    assert unwrapped.reference_at(1) == ('p-a', KeyType.EXTERNAL)
+    assert first.name == 'A'
+    assert len(model.refs) == 3
 
 
 def test_reference_list_assignment_and_addition_preserve_metadata():

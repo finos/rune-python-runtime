@@ -32,6 +32,7 @@ from rune.runtime.metadata import (
     _EnumWrapper,
 )
 from rune.runtime.reference_list import _ReferenceList
+from rune.runtime.utils import rune_unwrap_proxy
 
 logger = logging.getLogger(__name__)
 
@@ -120,9 +121,7 @@ class BaseDataClass(BaseModel, ComplexTypeMetaDataMixin):
     def _prepare_reference_list(self, name: str, value: Any,
                                  *, copy_existing: bool = False) -> _ReferenceList | None:
         '''Prepare reference lists, copying existing storage when taking ownership.'''
-        unwrap = getattr(value, '_unwrap', None)
-        if callable(unwrap):
-            value = unwrap()
+        value = rune_unwrap_proxy(value)
         if isinstance(value, _ReferenceList):
             if value.has_references():
                 for child, reference in value.reference_items():
@@ -187,16 +186,12 @@ class BaseDataClass(BaseModel, ComplexTypeMetaDataMixin):
         if isinstance(data, BaseDataClass):
             return data
 
-        unwrap = getattr(data, '_unwrap', None)
-        if callable(unwrap):
-            data = unwrap()
-            if isinstance(data, BaseDataClass):
-                return {
-                    name: getattr(data, name)
-                    for name in type(data).__pydantic_fields__
-                }
-            return data
-
+        data = rune_unwrap_proxy(data)
+        if isinstance(data, BaseDataClass):
+            return {
+                name: getattr(data, name)
+                for name in type(data).__pydantic_fields__
+            }
         return data
 
     @model_validator(mode='before')
@@ -685,9 +680,7 @@ class BaseDataClass(BaseModel, ComplexTypeMetaDataMixin):
 
 def _validate_conditions_recursively(obj, raise_exc=True):
     '''Helper to execute conditions recursively on a model.'''
-    unwrap = getattr(obj, '_unwrap', None)
-    if callable(unwrap):
-        obj = unwrap()
+    obj = rune_unwrap_proxy(obj)
     if not obj:
         return []
     if isinstance(obj, BaseDataClass):

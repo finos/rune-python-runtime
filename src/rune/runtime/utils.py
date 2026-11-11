@@ -12,6 +12,8 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from dateutil import parser
 
+from rune.runtime.reference_list import _ReferenceList
+
 __all__ = [
     'Multiprop',
     'if_cond_fn',
@@ -31,12 +33,24 @@ __all__ = [
     'rune_resolve_attr',
     'rune_resolve_attr_values',
     'rune_resolve_deep_attr',
+    'rune_sorted',
     'rune_str',
+    'rune_unwrap_proxy',
     'rune_wrap_none',
     'rune_zoned_date_time'
 ]
 
 logger = logging.getLogger(__name__)
+
+
+def rune_unwrap_proxy(value: Any) -> Any:
+    '''Unwrap one level through a callable `_unwrap` hook, if present.
+
+    Ordinary values are returned unchanged. Nested proxies and containers are
+    not traversed, and exceptions raised by the hook propagate to the caller.
+    '''
+    unwrap = getattr(value, '_unwrap', None)
+    return unwrap() if callable(unwrap) else value
 
 
 def if_cond_fn(ifexpr: bool, thenexpr: Callable, elseexpr: Callable) -> Any:
@@ -247,10 +261,7 @@ def _cmp_operand(v):
     '''Unwrap proxies and normalize `None` for Rune comparisons.'''
     if v is None:
         return rune_wrap_none(v)
-    unwrap = getattr(v, '_unwrap', None)
-    if callable(unwrap):
-        v = unwrap()
-    return rune_wrap_none(v)
+    return rune_wrap_none(rune_unwrap_proxy(v))
 
 
 _cmp = {
@@ -353,6 +364,23 @@ def rune_filter(items, filter_func):
     :return: Filtered list.
     '''
     return [item for item in (items or []) if filter_func(item)]
+
+
+def rune_sorted(values: Iterable[Any], *, key: Callable[[Any], Any] | None = None,
+                reverse: bool = False) -> list[Any]:
+    '''Return a stable, shallow sorted copy, preserving reference occurrences.
+
+    Reference lists retain their metadata. Other iterables produce a plain list.
+    COW inputs retain their item proxies, so subsequent object edits still use
+    copy-on-write. Sorting does not change the input collection's order.
+    '''
+    current = rune_unwrap_proxy(values)
+    if isinstance(current, _ReferenceList):
+        result = current.copy() if current is values else current.with_values(values)
+    else:
+        result = list(values)
+    result.sort(key=key, reverse=reverse)
+    return result
 
 
 def rune_add_to_list(rune_list: list, value: Any) -> None:
