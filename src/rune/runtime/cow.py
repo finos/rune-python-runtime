@@ -7,6 +7,7 @@ from typing import Any, Callable
 
 from rune.runtime.base_data_class import BaseDataClass
 from rune.runtime.object_builder import ObjectBuilder
+from rune.runtime.reference_list import _ReferenceList
 from rune.runtime.utils import rune_mangle_name, rune_resolve_attr
 
 __all__ = ["rune_cow", "rune_unwrap"]
@@ -19,7 +20,7 @@ def _clone_for_write(value: Any) -> Any:
     return copy.deepcopy(value)
 
 
-def _wrap_child(value: Any, on_write: Callable[[Any], None] | None) -> Any:
+def _wrap_child(value: Any, on_write: Callable[[Any], Any] | None) -> Any:
     """Wrap mutable child values and pass through immutable values."""
     if isinstance(value, _COWBase):
         return value
@@ -41,9 +42,9 @@ class _COWBase:
 
     _original: Any
     _shadow: Any | None
-    _on_write: Callable[[Any], None] | None
+    _on_write: Callable[[Any], Any] | None
 
-    def __init__(self, original: Any, on_write: Callable[[Any], None] | None = None):
+    def __init__(self, original: Any, on_write: Callable[[Any], Any] | None = None):
         self._original = original
         self._shadow = None
         self._on_write = on_write
@@ -55,7 +56,9 @@ class _COWBase:
         if self._shadow is None:
             self._shadow = _clone_for_write(self._original)
             if self._on_write is not None:
-                self._on_write(self._shadow)
+                attached = self._on_write(self._shadow)
+                if isinstance(self._shadow, _ReferenceList) and isinstance(attached, _ReferenceList):
+                    self._shadow = attached
         return self._shadow
 
     def _mark_written(self) -> None:
@@ -71,6 +74,17 @@ class _COWBase:
 
 class _COWObject(_COWBase):
     """Proxy for mutable model/object instances."""
+
+    def __init__(self, original: Any,
+                 on_write: Callable[[Any], Any] | None = None,
+                 writable_target: Callable[[], Any] | None = None) -> None:
+        super().__init__(original, on_write)
+        self._writable_target = writable_target
+
+    def _ensure_shadow(self) -> Any:
+        if self._shadow is None and self._writable_target is not None:
+            self._shadow = self._writable_target()
+        return super()._ensure_shadow()
 
     def __getattr__(self, name: str) -> Any:
         target = self._current()
@@ -88,10 +102,20 @@ class _COWObject(_COWBase):
         delattr(shadow, name)
         self._mark_written()
 
-    def _set_attr(self, name: str, value: Any) -> None:
+    def _set_attr(self, name: str, value: Any) -> Any:
         shadow = self._ensure_shadow()
+        if isinstance(value, _ReferenceList):
+            value = value.copy()
+            for index in range(len(value)):
+                if reference := value.reference_at(index):
+                    try:
+                        target = shadow.get_object_by_key(*reference)
+                    except KeyError:
+                        continue
+                    value.bind(index, target, *reference)
         setattr(shadow, name, value)
         self._mark_written()
+        return getattr(shadow, name)
 
     def _rune_get_attr(self, attrib: str) -> Any:
         """Resolver hook used by rune_resolve_attr."""
@@ -202,9 +226,20 @@ class _COWList(_COWBase, MutableSequence):
     def __getitem__(self, index):
         current = self._current()
         value = current[index]
-        return _wrap_child(
-            value, lambda new_value, index=index: self._set_item(index, new_value)
-        )
+        return self._wrap_item(index, value)
+
+    def _wrap_item(self, index: int | slice, value: Any) -> Any:
+        def callback(new_value: Any) -> None:
+            self._set_child(index, new_value)
+
+        current = self._current()
+        if (isinstance(current, _ReferenceList) and not isinstance(index, slice)
+                and current.reference_at(index) and isinstance(value, BaseDataClass)):
+            # Edit the canonical target in the detached graph, so a reference
+            # and its containment occurrence still expose the same object.
+            return _COWObject(value, on_write=callback,
+                              writable_target=lambda: self._ensure_shadow()[index])
+        return _wrap_child(value, callback)
 
     def __setitem__(self, index, value) -> None:
         self._set_item(index, rune_unwrap(value))
@@ -222,7 +257,19 @@ class _COWList(_COWBase, MutableSequence):
     def __iter__(self):
         current = self._current()
         for idx, value in enumerate(current):
-            yield _wrap_child(value, lambda new_value, idx=idx: self._set_item(idx, new_value))
+            yield self._wrap_item(idx, value)
+
+    def _set_child(self, index, value: Any) -> None:
+        '''Keep reference intent when a contained object's COW proxy changes.'''
+        shadow = self._ensure_shadow()
+        reference = (shadow.reference_at(index)
+                     if isinstance(shadow, _ReferenceList) and not isinstance(index, slice)
+                     else None)
+        if reference is not None:
+            shadow.bind(index, rune_unwrap(value), *reference)
+        else:
+            shadow[index] = rune_unwrap(value)
+        self._mark_written()
 
     def _set_item(self, index, value: Any) -> None:
         shadow = self._ensure_shadow()
@@ -336,6 +383,19 @@ def rune_unwrap(value: Any) -> Any:
         if isinstance(item, _COWBase):
             unwrapped, _ = _unwrap_inner(item._unwrap())
             return unwrapped, True
+
+        if isinstance(item, _ReferenceList):
+            out = item.copy()
+            changed = False
+            memo[item_id] = out
+            for index, value in enumerate(item):
+                value_unwrapped, value_changed = _unwrap_inner(value)
+                list.__setitem__(out, index, value_unwrapped)
+                changed = changed or value_changed
+            if changed:
+                return out, True
+            memo[item_id] = item
+            return item, False
 
         if isinstance(item, list):
             out = []

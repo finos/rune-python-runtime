@@ -64,6 +64,11 @@ class DummyLoan2(BaseDataClass):
     }
 
 
+class KeyedLoan(DummyLoan2):
+    '''Loan with metadata on both the root and its cash flow fields.'''
+    _ALLOWED_METADATA = {'@key', '@key:external'}
+
+
 class NamedLoan(DummyLoan2):
     '''Inherit both reference fields without redeclaring their annotations.'''
     label: str = 'loan'
@@ -595,5 +600,75 @@ def test_unresolved_ref_dangling_behavior():
     model = DummyLoan2.model_validate_json(json_str)
     with pytest.raises(KeyError):
         model.resolve_references(ignore_dangling=False, recurse=False)
+
+
+@pytest.mark.parametrize('metadata', [
+    pytest.param({'@key': 'cf-1'}, id='key'),
+    pytest.param({'@key:external': 'cf-ext-1'}, id='external-key'),
+    pytest.param({'@key': 'cf-1', '@key:external': 'cf-ext-1'}, id='both'),
+])
+@pytest.mark.parametrize('validate_model', [False, True])
+def test_rune_serialize_preserves_top_level_metadata(
+    metadata: dict[str, str], validate_model: bool,
+) -> None:
+    '''Root keys must survive deserialization and serialization (issue #64).'''
+    data = metadata | {'currency': 'EUR', 'amount': '100'}
+    model = CashFlow.rune_deserialize(data, validate_model=validate_model)
+    for key, value in metadata.items():
+        assert model.get_meta(key) == value
+
+    written = json.loads(model.rune_serialize(validate_model=validate_model))
+
+    assert written.items() >= data.items()
+    assert {'@type', '@model', '@version'} <= written.keys()
+
+
+def test_rune_serialize_preserves_root_and_field_metadata() -> None:
+    '''Root and nested objects must retain their own distinct keys.'''
+    data = {
+        '@key': 'loan-1',
+        '@key:external': 'loan-ext-1',
+        'loan': {'@key': 'cf-1', 'currency': 'EUR', 'amount': '100'},
+        'repayment': {
+            '@key:external': 'cf-ext-2', 'currency': 'EUR', 'amount': '101',
+        },
+    }
+    model = KeyedLoan.rune_deserialize(data)
+
+    written = json.loads(model.rune_serialize())
+
+    for key, value in data.items():
+        assert written.get(key) == value
+
+
+@pytest.mark.parametrize('model_type', [CashFlow, CashFlowNoKey])
+def test_rune_serialize_without_metadata_adds_no_keys(
+    model_type: type[BaseDataClass],
+) -> None:
+    '''Leave keys absent for models without stored metadata.'''
+    model = model_type(currency='EUR', amount=100)
+
+    written = json.loads(model.rune_serialize())
+
+    assert not any(key.startswith('@key') for key in written)
+
+
+def test_rune_serialize_keeps_metadata_and_reflects_changes() -> None:
+    '''Repeated serialization must preserve keys without caching stale ones.'''
+    model = CashFlow.rune_deserialize({
+        '@key': 'cf-1', 'currency': 'EUR', 'amount': '100',
+    })
+
+    first = model.rune_serialize()
+
+    assert model.rune_serialize() == first
+    assert model.get_meta('@key') == 'cf-1'
+    assert json.loads(first)['@key'] == 'cf-1'
+
+    model.set_meta(key='cf-2')
+    assert json.loads(model.rune_serialize())['@key'] == 'cf-2'
+
+    model.set_meta(key=None)
+    assert '@key' not in json.loads(model.rune_serialize())
 
 # EOF

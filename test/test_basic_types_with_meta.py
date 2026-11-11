@@ -284,6 +284,21 @@ def test_load_optional_annotated_date_with_none(json_str):
     assert model.date is None
 
 
+@pytest.mark.parametrize('options, expected', [
+    ({}, {'date': None}),
+    ({'exclude_none': True}, {}),
+    ({'exclude_defaults': True}, {}),
+])
+def test_optional_annotated_date_serializes_none(options, expected):
+    '''Null basic values honor the public dump options.'''
+    model = OptionalAnnotatedDateModel(date=None)
+
+    assert model.model_dump(**options) == expected
+    assert json.loads(model.model_dump_json(**options)) == expected
+    written = json.loads(model.rune_serialize(**({'exclude_defaults': False} | options)))
+    assert ('date' in written) == ('date' in expected)
+
+
 @pytest.mark.parametrize('value', [
     '2024-10-10',
     {'@data': '2024-10-10', '@scheme': 'http://fpml.org'},
