@@ -292,17 +292,19 @@ class BaseMetaDataMixin:
             raise ValueError('Not allowed metadata provided: '
                              f'{prop_keys - allowed}')
 
-    def _init_meta(self, allowed_meta: set[str]):
-        ''' if not initialised, just creates empty meta slots. If the metadata
-            container is not empty, it will check if the already present keys
-            are conform to the allowed keys.
+    def _init_meta(self, allowed_meta: set[str]) -> None:
+        '''Validate populated metadata and initialize missing allowed slots.
+
+        None-valued slots can record permissions from an earlier field use;
+        they are unset metadata and do not restrict reuse in another field.
         '''
         allowed_meta = self._merged_allowed_meta(allowed_meta)
         meta = self.__dict__.setdefault(META_CONTAINER, {})
         current_meta = set(meta.keys())
-        if not current_meta.issubset(allowed_meta):
+        populated_meta = {name for name, value in meta.items() if value is not None}
+        if not populated_meta.issubset(allowed_meta):
             raise ValueError(f'Allowed meta {allowed_meta} differs from the '
-                             f'currently existing meta slots: {current_meta}')
+                             f'currently populated metadata: {populated_meta}')
         meta |= {k: None for k in allowed_meta - current_meta}
 
     @classmethod

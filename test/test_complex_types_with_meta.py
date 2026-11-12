@@ -2,13 +2,16 @@
 # SPDX-License-Identifier: Apache-2.0
 
 '''complex types tests'''
+from collections.abc import Callable
 from decimal import Decimal
 import json
 from typing_extensions import Annotated
 import pytest
-from pydantic import Field, ValidationError
+from pydantic import ConfigDict, Field, ValidationError
 
 from rune.runtime.base_data_class import BaseDataClass
+from rune.runtime.metadata import BaseReference, Reference
+from rune.runtime.object_builder import ObjectBuilder
 
 
 class CashFlow(BaseDataClass):
@@ -52,6 +55,44 @@ class OptionalLoanBook(BaseDataClass):
     loans: Annotated[list[CashFlow] | None,
                      CashFlow.serializer(),
                      CashFlow.validator()] = Field(None, validate_default=True)
+
+
+class KeyedEntity(BaseDataClass):
+    '''Key-bearing value from the metadata reuse reproduction in issue #15.'''
+    model_config = ConfigDict(defer_build=True)
+    _ALLOWED_METADATA = {'@key', '@key:external'}
+    number: int
+
+
+class ReferenceEntityHolder(BaseDataClass):
+    '''A field accepting an inline entity or an explicit reference.'''
+    model_config = ConfigDict(defer_build=True)
+    bar: Annotated[
+        KeyedEntity | BaseReference,
+        KeyedEntity.serializer(),
+        KeyedEntity.validator(('@key', '@key:external', '@ref', '@ref:external')),
+    ]
+    _KEY_REF_CONSTRAINTS = {'bar': {'@ref', '@ref:external'}}
+
+
+class PlainEntityHolder(BaseDataClass):
+    '''A metadata-validated field that does not allow references.'''
+    model_config = ConfigDict(defer_build=True)
+    bar: Annotated[
+        KeyedEntity,
+        KeyedEntity.serializer(),
+        KeyedEntity.validator(('@key', '@key:external')),
+    ]
+
+
+class PlainEntityList(BaseDataClass):
+    '''A list with the same metadata restrictions as the plain scalar field.'''
+    model_config = ConfigDict(defer_build=True)
+    bars: Annotated[
+        list[KeyedEntity],
+        KeyedEntity.serializer(),
+        KeyedEntity.validator(('@key', '@key:external')),
+    ]
 
 
 @pytest.fixture(params=[
@@ -186,5 +227,97 @@ def test_load_loan_with_meta():
                 '"repayment":{"currency":"EUR","amount":"101"}}')
     model = DummyLoan2.model_validate_json(json_str)
     assert model.loan.get_meta('key') == 'cf-1-1'
+
+
+def _assign_and_validate_entity(entity: KeyedEntity) -> KeyedEntity:
+    holder = PlainEntityHolder(bar=KeyedEntity(number=2))
+    holder.bar = entity
+    holder.validate_attribs()
+    return holder.bar
+
+
+@pytest.mark.parametrize('load', [
+    pytest.param(lambda entity: PlainEntityHolder(bar=entity).bar,
+                 id='constructor'),
+    pytest.param(lambda entity: PlainEntityHolder.model_validate({'bar': entity}).bar,
+                 id='model_validate'),
+    pytest.param(lambda entity: ObjectBuilder(PlainEntityHolder, bar=entity).to_model().bar,
+                 id='object_builder'),
+    pytest.param(lambda entity: PlainEntityList(bars=[entity]).bars[0],
+                 id='list'),
+    pytest.param(_assign_and_validate_entity, id='assignment_then_validation'),
+])
+def test_reuse_entity_after_reference_capable_field(
+    load: Callable[[KeyedEntity], KeyedEntity],
+) -> None:
+    '''Empty reference slots must not invalidate reuse in a plain field (#15).'''
+    entity = KeyedEntity(number=1)
+    ReferenceEntityHolder(bar=entity)
+
+    assert load(entity) is entity
+
+
+def test_entity_reuse_in_reverse_order_remains_valid() -> None:
+    '''Later reference-capable use must not invalidate an earlier holder.'''
+    entity = KeyedEntity(number=1)
+    plain = PlainEntityHolder(bar=entity)
+    ReferenceEntityHolder(bar=entity)
+
+    assert plain.validate_attribs() == []
+
+
+def test_entity_reuse_retains_populated_allowed_metadata() -> None:
+    '''Accept empty reference slots without discarding the entity's real key.'''
+    entity = KeyedEntity(number=1)
+    entity.set_external_key('entity-1')
+    ReferenceEntityHolder(bar=entity)
+
+    plain = PlainEntityHolder(bar=entity)
+
+    assert plain.bar is entity
+    assert plain.model_dump()['bar'] == {'@key:external': 'entity-1', 'number': 1}
+
+
+def test_entity_reuse_retains_reference_permissions() -> None:
+    '''A plain-field validation must keep an existing field reference-capable.'''
+    entity = KeyedEntity(number=1)
+    holder = ReferenceEntityHolder(bar=entity)
+    PlainEntityHolder(bar=entity)
+
+    reference = Reference(entity)
+    holder.bar = reference
+
+    assert holder.bar is entity
+    assert holder.model_dump()['bar'] == {'@ref': reference.target_key}
+
+
+def test_explicit_reference_reuse_preserves_target_identity() -> None:
+    '''Explicit references must continue to expose their existing targets.'''
+    entity = KeyedEntity(number=1)
+    entity.set_external_key('entity-1')
+
+    referenced = ReferenceEntityHolder(bar=Reference(entity))
+    plain = PlainEntityHolder(bar=entity)
+
+    assert referenced.bar is entity
+    assert plain.bar is entity
+
+
+def test_unset_metadata_is_compatible_with_a_plain_field() -> None:
+    '''Treat None-valued metadata as unset even if its name is not allowed.'''
+    entity = KeyedEntity(number=1)
+    entity.set_meta(check_allowed=False, scheme=None)
+
+    assert PlainEntityHolder(bar=entity).model_dump()['bar'] == {'number': 1}
+
+
+@pytest.mark.parametrize('value', ['unexpected', '', 0, False])
+def test_entity_reuse_rejects_disallowed_populated_metadata(value: object) -> None:
+    '''Continue rejecting forbidden metadata values, including falsey values.'''
+    entity = KeyedEntity(number=1)
+    entity.set_meta(check_allowed=False, scheme=value)
+
+    with pytest.raises(ValidationError, match='Allowed meta'):
+        PlainEntityHolder(bar=entity)
 
 # EOF
