@@ -4,7 +4,7 @@ from __future__ import annotations
 import copy
 from typing import Any
 
-from rune.runtime.base_data_class import BaseDataClass
+from rune.runtime.base_data_class import BaseDataClass, _rune_json_input
 from rune.runtime.reference_list import _ReferenceList
 from rune.runtime.utils import rune_mangle_name
 
@@ -59,7 +59,8 @@ class ObjectBuilder:
             raise ValueError('Draft has no model class configured.')
         data = self.to_dict()
         if hasattr(self._model_cls, 'model_validate'):
-            return self._model_cls.model_validate(data)
+            with _rune_json_input(False):
+                return self._model_cls.model_validate(data)
         return self._model_cls(**data)
 
     def __deepcopy__(self, memo):
@@ -91,7 +92,7 @@ class ObjectBuilder:
 
 
 class _PathDraft:
-    __slots__ = ('_root', '_path')
+    __slots__ = ('_path', '_root')
     _root: ObjectBuilder
     _path: list[str]
 

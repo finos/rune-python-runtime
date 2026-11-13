@@ -459,6 +459,11 @@ class BaseMetaDataMixin:
 class ComplexTypeMetaDataMixin(BaseMetaDataMixin):
     '''metadata support for complex types'''
     @classmethod
+    def _is_rune_choice(cls) -> bool:
+        '''Whether the generator explicitly marked this type as a Rune choice.'''
+        return getattr(cls, '_RUNE_CHOICE', False)
+
+    @classmethod
     def _type_to_cls(cls,
                      metadata:dict[str, Any],
                      namespace_prefix: str | None = None):
@@ -481,7 +486,10 @@ class ComplexTypeMetaDataMixin(BaseMetaDataMixin):
         if isinstance(obj, list):
             return [None if item is None else cls.serialise(item) for item in obj]
         res = obj.serialise_meta()
-        res |= obj.model_dump(exclude_unset=True, exclude_defaults=True)
+        dumped = obj.model_dump(exclude_unset=True, exclude_defaults=True)
+        if obj._is_rune_choice():
+            return res | {'@data': dumped} if res else dumped
+        res |= dumped
         if cls != obj.__class__:
             # pylint: disable=protected-access
             # res = {'@type': obj._FQRTN} | res
@@ -514,14 +522,25 @@ class ComplexTypeMetaDataMixin(BaseMetaDataMixin):
             (metadata if k.startswith('@') else fields)[k] = v
 
         # References deserialization treatment
-        if aux := cls._create_unresolved_ref(metadata):
+        is_choice = cls._is_rune_choice()
+        if not (is_choice and '@type' in metadata) and (
+                aux := cls._create_unresolved_ref(metadata)):
             return aux
 
-        # Model creation
-        rune_cls = cls._type_to_cls(metadata)
-        if rune_cls != cls and not issubclass(rune_cls, cls):
-            raise ValueError(f'{rune_cls} has to be a child class of {cls}!')
-        model = rune_cls.model_validate(fields)  # type: ignore
+        rune_cls = cls
+        if is_choice:
+            if '@data' in metadata and '@type' not in metadata:
+                fields = metadata.pop('@data')
+            else:
+                fields = obj
+                metadata = {}
+        else:
+            rune_cls = cls._type_to_cls(metadata)
+            if rune_cls != cls and not issubclass(rune_cls, cls):
+                raise ValueError(f'{rune_cls} has to be a child class of {cls}!')
+
+        # Concrete models also inherit Pydantic's BaseModel, which supplies model_validate.
+        model = rune_cls.model_validate(fields)  # pyright: ignore[reportAttributeAccessIssue]
         model.__dict__[META_CONTAINER] = metadata
         if cls.meta_checks_enabled():
             model._init_meta(allowed_meta)  # pylint: disable=protected-access

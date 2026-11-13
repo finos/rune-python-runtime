@@ -9,19 +9,19 @@ The bundle generator defers field annotations for bundled (cyclic) classes:
 Pydantic's model_rebuild reads model_fields["f"].annotation (the bare type,
 e.g. Optional[Party | BaseReference]) to build the core schema.  The
 PlainValidator placed in __annotations__["f"] is ignored.  The resulting
-schema for the Party union arm is function-wrap[_deserialize_refs()], which
+schema for the Party union arm is function-wrap[_deserialize_rune_model()], which
 calls handler(data) before checking whether data is a reference dict.  When
 data is {'@ref:external': 'some-id'}, handler fails trying to construct Party
 because its required fields are absent.
 
-The fix is to have _deserialize_refs check for reference dicts BEFORE calling
+The fix is to have _deserialize_rune_model check for reference dicts BEFORE calling
 handler, consistent with ComplexTypeMetaDataMixin.deserialize.
 Target keys must also be retained when the deferred schema bypasses the field
 metadata validator, so references in sibling lists can find their targets.
 
 Note on placement: this test lives in rune-runtime even though the Phase 1/2/3
 pattern originates in the rune-python-generator's bundle generator.  The runtime
-has no awareness of bundles; however, _deserialize_refs is a runtime method and
+has no awareness of bundles; however, _deserialize_rune_model is a runtime method and
 the fix must be applied there.  The test simulates the bundle generator's output
 in plain Python so that the runtime can own a regression guard for this behaviour
 without depending on the generator.

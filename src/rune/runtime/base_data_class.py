@@ -1,9 +1,11 @@
 '''Base class for all Rune type classes'''
+import contextvars
 import copy
 import importlib
 import json
 import logging
-from collections.abc import Mapping, MutableSequence
+from collections.abc import Generator, Mapping, MutableSequence
+from contextlib import contextmanager
 from decimal import Decimal
 from enum import Enum
 from functools import cache
@@ -13,8 +15,11 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     ModelWrapValidatorHandler,
+    PlainSerializer,
     TypeAdapter,
     ValidationError,
+    ValidationInfo,
+    WrapSerializer,
     model_serializer,
     model_validator,
 )
@@ -38,6 +43,17 @@ logger = logging.getLogger(__name__)
 
 ROOT_CONTAINER = '__rune_root_metadata'
 _LIST_INDICES = TypeAdapter(list[int])
+_JSON_INPUT = contextvars.ContextVar('rune_json_input', default=False)
+
+
+@contextmanager
+def _rune_json_input(enabled: bool = True) -> Generator[None, None, None]:
+    '''Scope wire validation, allowing explicit native constructors and builders.'''
+    token = _JSON_INPUT.set(enabled)
+    try:
+        yield
+    finally:
+        _JSON_INPUT.reset(token)
 
 
 def _annotation_contains(annotation: Any, base_types: tuple[type, ...], *, unknown: bool = False) -> bool:
@@ -49,7 +65,16 @@ def _annotation_contains(annotation: Any, base_types: tuple[type, ...], *, unkno
     return any(_annotation_contains(arg, base_types, unknown=unknown) for arg in get_args(annotation))
 
 
-class BaseDataClass(BaseModel, ComplexTypeMetaDataMixin):
+class _RuneModelMeta(type(BaseModel)):
+    '''Distinguish explicit Python calls from Pydantic's nested wire validation.'''
+    def __call__(cls, *args, **kwargs):
+        if not _JSON_INPUT.get():
+            return super().__call__(*args, **kwargs)
+        with _rune_json_input(False):
+            return super().__call__(*args, **kwargs)
+
+
+class BaseDataClass(BaseModel, ComplexTypeMetaDataMixin, metaclass=_RuneModelMeta):
     ''' A base class for all cdm generated classes. It is derived from
         `pydantic.BaseModel` which provides type checking at object creation
         for all cdm classes. It provides as well the `validate_model`,
@@ -87,6 +112,7 @@ class BaseDataClass(BaseModel, ComplexTypeMetaDataMixin):
         cls._reference_fields.cache_clear()
         cls._containment_fields.cache_clear()
         cls._reference_constraints.cache_clear()
+        cls._choice_option_class.cache_clear()
         return super().model_rebuild(force=force, raise_errors=raise_errors,
                                      _parent_namespace_depth=_parent_namespace_depth + 1,
                                      _types_namespace=_types_namespace)
@@ -201,13 +227,15 @@ class BaseDataClass(BaseModel, ComplexTypeMetaDataMixin):
         return cls._unwrap_cow_validation_input(data)
 
     @model_serializer(mode='wrap')
-    def _serialize_refs(self, serializer, info):
-        '''should replace objects with refs while serializing'''
+    def _serialize_rune_model(self, serializer, info):
+        '''Serialize fields, replace references, flatten choices, and add root metadata.'''
         refs = self._get_rune_refs_container()
         reference_fields = type(self)._reference_fields()
         root_metadata = self.__dict__.get(ROOT_CONTAINER)
         if not refs and not reference_fields:
             result = serializer(self)
+            if self._is_rune_choice():
+                result = self._flatten_choice(result, info)
             return root_metadata | result if root_metadata else result
         updates = {}
         list_fields = {}
@@ -263,6 +291,8 @@ class BaseDataClass(BaseModel, ComplexTypeMetaDataMixin):
                     key, key_type = reference
                     written[position] = {key_type.rune_ref_tag: key}
             res[output_name] = written
+        if self._is_rune_choice():
+            res = self._flatten_choice(res, info)
         return root_metadata | res if root_metadata else res
 
     @staticmethod
@@ -284,13 +314,116 @@ class BaseDataClass(BaseModel, ComplexTypeMetaDataMixin):
         field = type(self).model_fields[name]
         return (field.serialization_alias or name) if by_alias else name
 
+    @classmethod
+    @cache
+    def _choice_option_class(cls, name: str) -> type['BaseDataClass'] | None:
+        '''Find the declared data/choice class of the selected field only.'''
+        def find(annotation):
+            if isinstance(annotation, type) and issubclass(annotation, BaseDataClass):
+                return annotation
+            for argument in get_args(annotation):
+                if result := find(argument):
+                    return result
+            return None
+        return find(cls.model_fields[name].annotation)
+
+    @classmethod
+    def _choice_to_fields(cls, data: dict[str, Any]) -> dict[str, Any]:
+        '''Route a wire discriminator to its immediate generated option field.
+
+        Raise TypeError for malformed discriminator/wrapper types and ValueError
+        for missing or unsupported values.
+        '''
+        if '@type' not in data:
+            if any(key.startswith('@ref') for key in data):
+                return data
+            if '@data' in data:
+                if not isinstance(data['@data'], dict):
+                    raise TypeError("Choice '@data' must contain an object")
+                metadata = {key: value for key, value in data.items() if key != '@data'}
+                return metadata | cls._choice_to_fields(data['@data'])
+            raise ValueError(f"Missing required '@type' for choice {cls._fqrtn()}")
+
+        tag = data['@type']
+        if not isinstance(tag, str):
+            raise TypeError("Choice '@type' must be a string")
+        dispatch = getattr(cls, '_CHOICE_DISPATCH', {})
+        if tag not in dispatch:
+            raise ValueError(f"'{tag}' is not an option of choice {cls._fqrtn()}")
+        name = dispatch[tag]
+        option_class = cls._choice_option_class(name)
+        body = {key: value for key, value in data.items() if key != '@type'}
+        if option_class is None:
+            wrapped = any(isinstance(item, (PlainSerializer, WrapSerializer))
+                          for item in cls.model_fields[name].metadata)
+            if '@data' in body and body['@data'] is None:
+                raise ValueError(f'Choice option {tag} must have a non-null value')
+            if '@data' not in body and not (wrapped and any(key.startswith('@ref') for key in body)):
+                raise ValueError(f"Missing required '@data' for choice option {tag}")
+            if wrapped:
+                value = body
+            else:
+                value = body['@data']
+        elif tag == option_class._fqrtn():
+            value = body
+        elif option_class._is_rune_choice():
+            value = data
+        else:
+            raise ValueError(f"'{tag}' does not match declared option {option_class._fqrtn()}")
+        return {name: value}
+
+    def _flatten_choice(self, serialized: dict[str, Any], info) -> dict[str, Any]:
+        '''Write the selected leaf, retaining valid option metadata/reference wrappers.'''
+        selected = [name for name in type(self).model_fields
+                    if self.__dict__.get(name) is not None]
+        if not selected:
+            return {}
+        if len(selected) > 1:
+            raise ValueError(f'Multiple choice options selected for {self._fqrtn()}: {selected}')
+        name = selected[0]
+        output_name = self._serialized_field_name(name, info)
+        if output_name not in serialized:
+            return {}
+        option = serialized[output_name]
+        option_class = type(self)._choice_option_class(name)
+        if option_class is None:
+            tags = [tag for tag, field in getattr(type(self), '_CHOICE_DISPATCH', {}).items()
+                    if field == name]
+            if len(tags) != 1:
+                raise ValueError(f'Missing or ambiguous discriminator for choice option {name}')
+            if isinstance(option, dict) and ('@data' in option
+                                            or any(key.startswith('@ref') for key in option)):
+                return {'@type': tags[0]} | option
+            return {'@type': tags[0], '@data': option}
+
+        value = rune_unwrap_proxy(self.__dict__[name])
+        if isinstance(value, BaseDataClass) and type(value) is not option_class:
+            raise ValueError(f'Choice option {name} must be exactly {option_class._fqrtn()}')
+        if option_class._is_rune_choice():
+            if '@type' not in option and ('@data' in option
+                                         or any(key.startswith('@ref') for key in option)):
+                return {'@type': option_class._fqrtn()} | option
+            if isinstance(value, BaseDataClass) and not any(
+                    value.__dict__.get(field) is not None for field in type(value).model_fields):
+                raise ValueError(f'Nested choice {option_class._fqrtn()} has no selected option')
+            return option
+        return option | {'@type': option_class._fqrtn()}
+
     @model_validator(mode='wrap')
     @classmethod
-    def _deserialize_refs(cls, data: Any,
-                          handler: ModelWrapValidatorHandler[Self]) -> Self:
-        '''should resolve refs after creation'''
+    def _deserialize_rune_model(cls, data: Any,
+                                handler: ModelWrapValidatorHandler[Self], info: ValidationInfo) -> Self:
+        '''Decode choices, validate fields, and initialize parents, keys, and references.'''
+        if info.mode == 'json' and not _JSON_INPUT.get():
+            # TypeAdapter.validate_json also needs to mark nested Python revalidation.
+            with _rune_json_input():
+                return cls._deserialize_rune_model(data, handler, info) # type: ignore
         metadata = {}
         if isinstance(data, dict):
+            if cls._is_rune_choice() and (
+                    _JSON_INPUT.get() or '@type' in data or '@data' in data
+                    or any(key.startswith('@ref') for key in data)):
+                data = cls._choice_to_fields(data)
             metadata = {k: v for k, v in data.items() if k.startswith('@')}
             if aux := cls._create_unresolved_ref(metadata):
                 return aux  # type: ignore
@@ -439,7 +572,8 @@ class BaseDataClass(BaseModel, ComplexTypeMetaDataMixin):
             root_meta['@version'] = self.get_model_version()
             # The top-level object isn't held in a field, so no field
             # serializer writes its own metadata
-            root_meta |= self.serialise_meta()  # type: ignore
+            if not self._is_rune_choice():
+                root_meta |= self.serialise_meta()  # type: ignore
 
             return self.model_dump_json(indent=indent,
                                         include=include,
@@ -507,9 +641,10 @@ class BaseDataClass(BaseModel, ComplexTypeMetaDataMixin):
         rune_prefix = cls._get_rune_namespace_prefix()
         if rune_prefix is None and cls is BaseDataClass:
             rune_prefix = namespace_prefix
-        rune_cls = cls._type_to_cls(rune_dict,
-                                    namespace_prefix=rune_prefix)
-        model = rune_cls.model_validate(rune_dict, strict=strict)
+        rune_cls = cls if cls._is_rune_choice() else cls._type_to_cls(
+            rune_dict, namespace_prefix=rune_prefix)
+        with _rune_json_input():
+            model = rune_cls.model_validate(rune_dict, strict=strict)
         model.resolve_references(ignore_dangling=False, recurse=True)
         if validate_model:
             model.validate_model(
@@ -547,12 +682,13 @@ class BaseDataClass(BaseModel, ComplexTypeMetaDataMixin):
                                                by_name=by_name)
         # Decimal keeps every digit; a float would round long numbers
         data = json.loads(json_data, parse_float=Decimal)
-        return cls.model_validate(data,
-                                  strict=strict,
-                                  extra=extra,
-                                  context=context,
-                                  by_alias=by_alias,
-                                  by_name=by_name)
+        with _rune_json_input():
+            return cls.model_validate(data,
+                                      strict=strict,
+                                      extra=extra,
+                                      context=context,
+                                      by_alias=by_alias,
+                                      by_name=by_name)
 
     def resolve_references(self, ignore_dangling=False, recurse=True):
         '''resolves all attributes which are references'''
