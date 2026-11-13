@@ -119,7 +119,7 @@ class Currency(EnumWithMetaMixin, Enum):
 class ChoiceBasicMeta(Choice):
     _FQRTN: ClassVar[str] = f'{NS}.ChoiceBasicMeta'
     _CHOICE_DISPATCH: ClassVar[dict[str, str]] = {
-        'java.lang.String': 'string', f'{NS}.Currency': 'currency',
+        'string': 'string', f'{NS}.Currency': 'currency',
     }
     string: Annotated[StrWithMeta | None, StrWithMeta.serializer(),
                       StrWithMeta.validator(('@scheme', '@key:scoped'))] = None
@@ -225,7 +225,7 @@ def test_basic_options_preserve_values(field, value, wire_value):
 
 
 @pytest.mark.parametrize('field, tag, value, metadata', [
-    ('string', 'java.lang.String', 'foo', {'@scheme': 'urn:test', '@key:scoped': 'k1'}),
+    ('string', 'string', 'foo', {'@scheme': 'urn:test', '@key:scoped': 'k1'}),
     ('currency', f'{NS}.Currency', 'USD', {'@scheme': 'urn:currencies'}),
 ])
 def test_basic_and_enum_option_metadata_is_retained(field, tag, value, metadata):
@@ -377,7 +377,7 @@ def test_basic_wire_option_requires_non_null_data(value):
 
 def test_wrapped_basic_wire_option_requires_data():
     with pytest.raises(ValidationError, match='Missing required'):
-        Root.rune_deserialize({'basic_meta': {'@type': 'java.lang.String'}}, validate_model=False)
+        Root.rune_deserialize({'basic_meta': {'@type': 'string'}}, validate_model=False)
 
 
 @pytest.mark.parametrize('load', [
