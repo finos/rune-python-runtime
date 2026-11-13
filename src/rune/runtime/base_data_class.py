@@ -328,11 +328,21 @@ class BaseDataClass(BaseModel, ComplexTypeMetaDataMixin, metaclass=_RuneModelMet
         return find(cls.model_fields[name].annotation)
 
     @classmethod
+    def _choice_dispatch(cls) -> dict[str, str]:
+        '''Return generated dispatch metadata, raising RuntimeError when absent.'''
+        dispatch = getattr(cls, '_CHOICE_DISPATCH', None)
+        if dispatch is None:
+            raise RuntimeError(f'Choice {cls._fqrtn()} is missing _CHOICE_DISPATCH. '
+                               'Regenerate the model with an updated Rune Python generator.')
+        return dispatch
+
+    @classmethod
     def _choice_to_fields(cls, data: dict[str, Any]) -> dict[str, Any]:
         '''Route a wire discriminator to its immediate generated option field.
 
         Raise TypeError for malformed discriminator/wrapper types and ValueError
-        for missing or unsupported values.
+        for missing or unsupported values. RuntimeError indicates missing
+        generated dispatch metadata.
         '''
         if '@type' not in data:
             if any(key.startswith('@ref') for key in data):
@@ -347,7 +357,7 @@ class BaseDataClass(BaseModel, ComplexTypeMetaDataMixin, metaclass=_RuneModelMet
         tag = data['@type']
         if not isinstance(tag, str):
             raise TypeError("Choice '@type' must be a string")
-        dispatch = getattr(cls, '_CHOICE_DISPATCH', {})
+        dispatch = cls._choice_dispatch()
         if tag not in dispatch:
             raise ValueError(f"'{tag}' is not an option of choice {cls._fqrtn()}")
         name = dispatch[tag]
@@ -374,6 +384,7 @@ class BaseDataClass(BaseModel, ComplexTypeMetaDataMixin, metaclass=_RuneModelMet
 
     def _flatten_choice(self, serialized: dict[str, Any], info) -> dict[str, Any]:
         '''Write the selected leaf, retaining valid option metadata/reference wrappers.'''
+        dispatch = type(self)._choice_dispatch()
         selected = [name for name in type(self).model_fields
                     if self.__dict__.get(name) is not None]
         if not selected:
@@ -387,7 +398,7 @@ class BaseDataClass(BaseModel, ComplexTypeMetaDataMixin, metaclass=_RuneModelMet
         option = serialized[output_name]
         option_class = type(self)._choice_option_class(name)
         if option_class is None:
-            tags = [tag for tag, field in getattr(type(self), '_CHOICE_DISPATCH', {}).items()
+            tags = [tag for tag, field in dispatch.items()
                     if field == name]
             if len(tags) != 1:
                 raise ValueError(f'Missing or ambiguous discriminator for choice option {name}')

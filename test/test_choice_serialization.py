@@ -295,6 +295,38 @@ def test_python_construction_keeps_native_field_dictionaries(load):
     assert model.data.A.value == 'foo'
 
 
+def test_missing_choice_dispatch_reports_regeneration_requirement():
+    class OutdatedChoice(BaseDataClass):
+        _FQRTN: ClassVar[str] = f'{NS}.OutdatedChoice'
+        _RUNE_CHOICE: ClassVar[bool] = True
+        string: str | None = None
+
+    with pytest.raises(RuntimeError, match='OutdatedChoice is missing _CHOICE_DISPATCH.*Regenerate the model'):
+        OutdatedChoice.model_validate_json('{"@type": "string", "@data": "foo"}')
+
+
+@pytest.mark.parametrize('fields', [
+    pytest.param({'string': 'foo'}, id='primitive'),
+    pytest.param({'currency': Currency.USD}, id='enum'),
+    pytest.param({'leaf': A(value='foo')}, id='data'),
+])
+@pytest.mark.parametrize('dump', [
+    lambda value: value.model_dump(),
+    lambda value: value.model_dump_json(),
+])
+def test_missing_choice_dispatch_reports_regeneration_requirement_on_write(fields, dump):
+    class OutdatedChoice(BaseDataClass):
+        _FQRTN: ClassVar[str] = f'{NS}.OutdatedChoice'
+        _RUNE_CHOICE: ClassVar[bool] = True
+        string: str | None = None
+        currency: Currency | None = None
+        leaf: A | None = None
+
+    with pytest.raises(PydanticSerializationError,
+                       match='OutdatedChoice is missing _CHOICE_DISPATCH.*Regenerate the model'):
+        dump(OutdatedChoice(**fields))
+
+
 def test_python_construction_also_accepts_tagged_values():
     model = Root(hooked={'@type': f'{NS}.A', 'value': 'foo'})
     assert model.hooked.A.value == 'foo'
@@ -447,6 +479,7 @@ def test_multiple_options_and_subtypes_are_rejected_on_write():
 
 
 def test_no_option_matches_java_empty_root_but_not_empty_nested_choice():
+    assert Choice().model_dump() == {}
     assert ChoiceAB().model_dump() == {}
     with pytest.raises(PydanticSerializationError, match='has no selected option'):
         ChoiceTree(ChoiceAB=ChoiceAB()).model_dump()
