@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: Apache-2.0
 #
 [build-system]
-requires = ["setuptools>=64", "setuptools_scm>=8", "wheel>=0.45.1", "pytest-runner>=6.0.1"]
+requires = ["setuptools>=77.0.3", "setuptools_scm>=8", "wheel>=0.45.1", "pytest-runner>=6.0.1"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -13,7 +13,7 @@ requires-python = ">=3.11"
 dependencies = [
    "pydantic>=2.10.3",
    "python-dateutil>=2.9.0.post0",
-   "tzdata>=2025.2"
+   "tzdata>=2026.6"
 ]
 optional-dependencies.dev = [
     "pytest>=9.0.2",
@@ -23,7 +23,7 @@ optional-dependencies.dev = [
     "licenseheaders>=0.8.8",
     "pre-commit>=3.0.0"
 ]
-description = "rune-runtime: the Rune DSL runtime for Python"
+description = "Runtime support for Python models and functions generated from Rune DSL"
 readme = "README.md"
 keywords = [
     "rune",
@@ -33,7 +33,7 @@ license = "Apache-2.0"
 authors = [
     { name = "Daniel Schwartz" },
     { name = "Plamen Neykov" },
-    { name = "Others (See AUTHORS)" }
+    { name = "Rune Python Runtime contributors" }
 ]
 classifiers = [
     "Development Status :: 6 - Mature",
@@ -46,9 +46,16 @@ classifiers = [
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
     "Topic :: Software Development :: Libraries",
     "Topic :: Software Development :: Libraries :: Python Modules"
 ]
+
+[project.urls]
+Homepage = "https://github.com/finos/rune-python-runtime"
+Documentation = "https://github.com/finos/rune-python-runtime/blob/main/README.md"
+Repository = "https://github.com/finos/rune-python-runtime"
+Issues = "https://github.com/finos/rune-python-runtime/issues"
 
 [tool.setuptools.packages.find]
 where = ["src"]

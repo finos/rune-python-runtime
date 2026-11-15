@@ -6,4 +6,8 @@ draft: false
 weight: 2
 ---
 
-See [README.md](../README.md) for the project description
+See the [README](../README.md) for the project overview, installation, and
+development setup.
+
+The [runtime design overview](design.md) introduces the architecture and links to
+the detailed design documents.

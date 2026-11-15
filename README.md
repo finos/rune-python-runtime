@@ -1,95 +1,90 @@
 [![FINOS - Incubating](https://cdn.jsdelivr.net/gh/finos/contrib-toolbox@master/images/badge-incubating.svg)](https://community.finos.org/docs/governance/Software-Projects/stages/incubating)
-[![Run Unit Tests](https://github.com/regnosys/rune-python-runtime/actions/workflows/run-tests.yml/badge.svg?branch=main)](https://github.com/regnosys/rune-python-runtime/actions/workflows/run-tests.yml)
-[![OpenSSF Best Practices](https://www.bestpractices.dev/projects/10733/badge)](https://www.bestpractices.dev/projects/10733)[![Python CI](https://github.com/regnosys/rune-python-runtime/actions/workflows/cve-scanning-python.yml/badge.svg)](https://github.com/regnosys/rune-python-runtime/actions/workflows/cve-scanning-python.yml)
+[![Run Unit Tests](https://github.com/finos/rune-python-runtime/actions/workflows/run-tests.yml/badge.svg?branch=main)](https://github.com/finos/rune-python-runtime/actions/workflows/run-tests.yml)
+[![OpenSSF Best Practices](https://www.bestpractices.dev/projects/10733/badge)](https://www.bestpractices.dev/projects/10733)
+[![Python CI](https://github.com/finos/rune-python-runtime/actions/workflows/cve-scanning-python.yml/badge.svg)](https://github.com/finos/rune-python-runtime/actions/workflows/cve-scanning-python.yml)
 <img align="right" width="15%" src="https://www.finos.org/hubfs/FINOS/finos-logo/FINOS_Icon_Wordmark_Name_RGB_horizontal.png">
+
 # Rune Python Runtime
 
-*Rune Python Runtime* - the runtime supports and is an integral part of Python code generated from a [Rune DSL](https://github.com/finos/rune-dsl) defined model.  Rune DSL is a Domain-Specific Language used to model Financial Markets activities including the [Common Domain Model (CDM)](https://github.com/finos/common-domain-model).  
+The Rune Python Runtime provides shared support for Python models and functions
+generated from [Rune DSL](https://github.com/finos/rune-dsl), including the
+[Common Domain Model (CDM)](https://github.com/finos/common-domain-model).
 
-The Rune Python Runtime is used in collaboration with the [Rune Python Code Generator](https://github.com/REGnosys/rune-python-generator) to translate a Rune DSL model into a fully usable Python package.
+The [Rune Python Code Generator](https://github.com/finos/rune-python-generator)
+translates Rune models into Python packages. This runtime supplies their shared
+validation, JSON serialization, metadata, reference handling, and function helpers.
 
 ## Installation
 
-The runtime is not generally installed on a stand alone basis but rather comes as part of a generated package such as CDM.
-However, pip install `rune-runtime` would install it from PyPi.
-
-## Development setup
-### Setup for developers
-This guide is meant for everyone who wants to contribute to the Rune Python Runtime and needs to get things up and running.
-### 1. Clone the Project
-Start by cloning the project: `git clone https://github.com/regnosys/rune-python-generator`
-
-### 2. Setup the Development Environment
-Use [dev_clean_setup.sh](https://github.com/Cloudrisk/rune-python-runtime/blob/main/dev_clean_setup.sh) to setup a development environment.
+Python 3.11 or later is required. The runtime is normally installed as a dependency
+of a generated model package. To install it directly:
 
 ```sh
+python -m pip install rune-runtime
+```
+
+## Design
+
+Start with the [runtime design overview](https://github.com/finos/rune-python-runtime/blob/main/docs/design.md) for the generator/runtime
+boundary, the main components, and links to the detailed design documents.
+
+## Development setup
+
+With Python 3.11 or later and Bash available (for example, Git Bash on Windows):
+
+```sh
+git clone https://github.com/finos/rune-python-runtime.git
+cd rune-python-runtime
 ./dev_clean_setup.sh
 ```
 
-This script installs all dev dependencies and registers the pre-commit hooks, including the license-header check. Every `.py` file under `src/` and `test/` must carry the Apache 2.0 SPDX header:
+The [setup script](https://github.com/finos/rune-python-runtime/blob/main/dev_clean_setup.sh) creates `.pydevenv`, installs development
+dependencies, and registers pre-commit hooks, including license-header checks.
 
-```python
-# Copyright (c) 2023-2026 CLOUDRISK Limited and FT Advisory LLC
-# SPDX-License-Identifier: Apache-2.0
-```
+Build a wheel, then run the tests against it in an isolated environment:
 
-To add missing headers to all files at any time, run:
-
-```sh
-src/license/apply_headers.sh
-```
-
-### 3. Build
-Use [build_wheel.sh](https://github.com/Cloudrisk/rune-python-runtime/blob/main/build_wheel.sh) to build the package
 ```sh
 ./build_wheel.sh
+./test/run_runtime_tests.sh
 ```
-To run the unit tests:
-```sh
-test/run_runtime_tests.sh
-```
+
+See [build_wheel.sh](https://github.com/finos/rune-python-runtime/blob/main/build_wheel.sh) and the
+[test runner](https://github.com/finos/rune-python-runtime/blob/main/test/run_runtime_tests.sh) for details.
 
 ## Roadmap
 
-The Roadmap will be aligned to the Rune DSL and [CDM](https://github.com/finos/common-domain-model/blob/master/ROADMAP.md) roadmaps.
-
-In addition, the intention is to make future releases available at [PyPi](https://pypi.org)
+The roadmap is aligned with Rune DSL and the
+[CDM roadmap](https://github.com/finos/common-domain-model/blob/master/ROADMAP.md).
 
 ## Contributors
+
 - [CLOUDRISK Limited](https://www.cloudrisk.uk), email: info@cloudrisk.co.uk
 - [FT Advisory LLC](https://www.ftadvisory.co), email: info@ftadvisory.co
 - [TradeHeader SL](https://www.tradeheader.com), email: info@tradeheader.com
 
 ## Contributing
-For any questions, bugs or feature requests please open an [issue](https://github.com/regnosys/rune-python-runtime/issues)
-For anything else please send an email to {project mailing list}.
 
-To submit a contribution:
-1. Fork it (<https://github.com/regnosys/rune-python-runtime/fork>)
-2. Create your feature branch (`git checkout -b feature/fooBar`)
-3. Read our [contribution guidelines](.github/CONTRIBUTING.md) and [Community Code of Conduct](https://www.finos.org/code-of-conduct)
-4. Commit your changes (`git commit -am 'Add some fooBar'`)
-5. Push to the branch (`git push origin feature/fooBar`)
-6. Create a new Pull Request
+For questions, bug reports, or feature requests, open a
+[GitHub issue](https://github.com/finos/rune-python-runtime/issues).
 
-_NOTE:_ Commits and pull requests to FINOS repositories will only be accepted from those contributors with an active, executed Individual Contributor License Agreement (ICLA) with FINOS OR who are covered under an existing and active Corporate Contribution License Agreement (CCLA) executed with FINOS. Commits from individuals not covered under an ICLA or CCLA will be flagged and blocked by the FINOS Clabot tool (or [EasyCLA](https://community.finos.org/docs/governance/Software-Projects/easycla)). Please note that some CCLAs require individuals/employees to be explicitly named on the CCLA.
+Read the [contribution guidelines](https://github.com/finos/rune-python-runtime/blob/main/CONTRIBUTING.md) for the contribution process
+and FINOS contributor license agreement requirements, and follow the
+[Community Code of Conduct](https://github.com/finos/rune-python-runtime/blob/main/.github/CODE_OF_CONDUCT.md).
+To contribute, [fork the runtime](https://github.com/finos/rune-python-runtime/fork),
+create a branch, and submit a pull request.
 
-*Need an ICLA? Unsure if you are covered under an existing CCLA? Email [help@finos.org](mailto:help@finos.org)*
-
-## Get in touch with the Rune Python Runtime Team
-
- Get in touch with the Rune team by creating a [GitHub issue](https://github.com/REGnosys/rune-python-runtime/issues/new) and labelling it with "help wanted".
-
- We encourage the community to get in touch via the [FINOS Slack](https://www.finos.org/blog/finos-announces-new-community-slack).
+You can also get in touch through
+[FINOS Slack](https://www.finos.org/blog/finos-announces-new-community-slack).
 
 ## Governance
 
-This project implements https://community.finos.org/docs/governance/#open-source-software-projects
+This project follows the
+[FINOS governance framework](https://community.finos.org/docs/governance/#open-source-software-projects).
 
 ## License
 
-Copyright 2023-2025 CLOUDRISK Limited and FT Advisory LLC
+Copyright 2023-2026 CLOUDRISK Limited and FT Advisory LLC
 
-Distributed under the [Apache License, Version 2.0](http://www.apache.org/licenses/LICENSE-2.0).
+Distributed under the [Apache License, Version 2.0](https://github.com/finos/rune-python-runtime/blob/main/LICENSE).
 
 SPDX-License-Identifier: [Apache-2.0](https://spdx.org/licenses/Apache-2.0)
