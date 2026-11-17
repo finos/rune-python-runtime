@@ -7,18 +7,23 @@ import datetime
 import importlib
 import uuid
 from collections.abc import Iterable
+from dataclasses import dataclass
 from decimal import Decimal
 from enum import Enum
-from functools import cache, lru_cache, partial
-from typing import Any, Self, get_args
+from functools import cache, lru_cache, partial, reduce
+from operator import or_
+from types import UnionType
+from typing import Annotated, Any, Self, Union, get_args, get_origin
 
 from pydantic import (
+    GetCoreSchemaHandler,
     PlainSerializer,
+    PlainValidator,
     ValidatorFunctionWrapHandler,
     WrapSerializer,
     WrapValidator,
 )
-from pydantic_core import PydanticCustomError
+from pydantic_core import CoreSchema, PydanticCustomError
 
 from rune.runtime.reference_list import _ReferenceList
 from rune.runtime.utils import rune_unwrap_proxy
@@ -503,7 +508,11 @@ class ComplexTypeMetaDataMixin(BaseMetaDataMixin):
         if isinstance(obj, list):
             processed = [cls.deserialize(item, allowed_meta) for item in obj]
             return obj.with_values(processed) if isinstance(obj, _ReferenceList) else processed
+        return cls._deserialize_scalar(obj, allowed_meta)
 
+    @classmethod
+    def _deserialize_scalar(cls, obj, allowed_meta: set[str]):
+        '''Decode one unwrapped model value; field schemas handle containers and nulls.'''
         if isinstance(obj, cls):
             if cls.meta_checks_enabled():
                 obj._init_meta(allowed_meta)  # pylint: disable=protected-access
@@ -558,16 +567,47 @@ class ComplexTypeMetaDataMixin(BaseMetaDataMixin):
 
     @classmethod
     @lru_cache
-    def validator(cls, allowed_meta: tuple[str, ...] = ()) -> WrapValidator:
-        '''Let the field schema validate None and deserialize Rune values.'''
-        allowed = set(allowed_meta)
+    def validator(cls, allowed_meta: tuple[str, ...] = ()) -> '_ComplexTypeValidator':
+        '''Keep field structure validation while decoding individual Rune values.'''
+        return _ComplexTypeValidator(cls, allowed_meta)
 
-        def validate(obj: Any, handler: ValidatorFunctionWrapHandler) -> Any:
-            if obj is None:
-                return handler(None)
-            return cls.deserialize(obj, allowed)
 
-        return WrapValidator(validate, json_schema_input_type=dict)
+@dataclass(frozen=True)
+class _ComplexTypeValidator:
+    '''Apply Rune decoding to model leaves without bypassing container schemas.'''
+
+    model_type: type[ComplexTypeMetaDataMixin]
+    allowed_meta: tuple[str, ...]
+
+    def __get_pydantic_core_schema__(self, source_type: Any, handler: GetCoreSchemaHandler) -> CoreSchema:
+        '''Build the field schema with Rune decoding confined to model values.'''
+        return handler(self._annotate_values(source_type))
+
+    def _annotate_values(self, source_type: Any) -> Any:
+        '''Retain the generated list/union structure and its existing metadata.'''
+        if source_type is self.model_type:
+            return Annotated[source_type, PlainValidator(self._deserialize, json_schema_input_type=dict)]
+
+        origin = get_origin(source_type)
+        arguments = get_args(source_type)
+        if origin is list:
+            return Annotated[list[self._annotate_values(arguments[0])], WrapValidator(self._validate_list)]
+        if origin in (Union, UnionType):
+            return reduce(or_, (self._annotate_values(argument) for argument in arguments))
+        if origin is Annotated:
+            return Annotated[self._annotate_values(arguments[0]), *arguments[1:]]
+        return source_type
+
+    def _deserialize(self, value: Any) -> Any:
+        value = rune_unwrap_proxy(value)
+        return self.model_type._deserialize_scalar(value, set(self.allowed_meta))
+
+    @staticmethod
+    def _validate_list(value: Any, handler: ValidatorFunctionWrapHandler) -> Any:
+        '''Validate the container while keeping reference occurrence metadata.'''
+        original = rune_unwrap_proxy(value)
+        validated = handler(original)
+        return original.with_values(validated) if isinstance(original, _ReferenceList) else validated
 
 
 class BasicTypeMetaDataMixin(BaseMetaDataMixin):

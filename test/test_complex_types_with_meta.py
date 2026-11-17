@@ -95,6 +95,33 @@ class PlainEntityList(BaseDataClass):
     ]
 
 
+@pytest.fixture(params=['direct', 'deferred'])
+def bounded_loan_book(request):
+    '''Use both standalone annotations and the generator's bundled updates.'''
+    annotations = {
+        'loan': CashFlow | None,
+        'loans': list[CashFlow | None],
+    }
+    if request.param == 'direct':
+        class LoanBook(BaseDataClass):
+            loan: Annotated[CashFlow | None, CashFlow.serializer(), CashFlow.validator()] = None
+            loans: Annotated[list[CashFlow | None], CashFlow.serializer(), CashFlow.validator()] = Field(
+                ..., min_length=1, max_length=2)
+    else:
+        class LoanBook(BaseDataClass):
+            model_config = ConfigDict(defer_build=True)
+            loan: None = None
+            loans: None = Field(..., min_length=1, max_length=2)
+
+        for name, annotation in annotations.items():
+            metadata = [CashFlow.serializer(), CashFlow.validator()]
+            LoanBook.model_fields[name].annotation = annotation
+            LoanBook.model_fields[name].metadata += metadata
+            LoanBook.__annotations__[name] = Annotated[annotation, *metadata]
+        LoanBook.model_rebuild(force=True)
+    return LoanBook
+
+
 @pytest.fixture(params=[
     pytest.param(lambda cls, data: cls(**data), id='constructor'),
     pytest.param(lambda cls, data: cls.model_validate(data), id='model_validate'),
@@ -161,6 +188,56 @@ def test_complex_list_rejects_none_elements(load_model):
     '''A nullable list of non-nullable objects must reject None elements.'''
     with pytest.raises(ValidationError):
         load_model(OptionalLoanBook, {'loans': [None]})
+
+
+@pytest.mark.parametrize('field_name, value', [
+    pytest.param('loans', [], id='too-short'),
+    pytest.param('loans', [{'currency': 'EUR', 'amount': '1'}] * 3, id='too-long'),
+    pytest.param('loans', {'currency': 'EUR', 'amount': '1'}, id='object-in-list-field'),
+    pytest.param('loans', [[{'currency': 'EUR', 'amount': '1'}]], id='nested-list'),
+    pytest.param('loan', [{'currency': 'EUR', 'amount': '1'}], id='list-in-scalar-field'),
+    pytest.param('loan', [], id='empty-list-in-scalar-field'),
+])
+def test_complex_fields_enforce_structure(load_model, bounded_loan_book, field_name, value):
+    '''Rune metadata adapters must retain the field's shape and cardinality.'''
+    data = {'loans': [{'currency': 'EUR', 'amount': '1'}], field_name: value}
+
+    with pytest.raises(ValidationError):
+        load_model(bounded_loan_book, data)
+
+
+def test_complex_list_accepts_declared_nullable_items(load_model, bounded_loan_book):
+    '''Item nullability belongs to the list schema rather than the model decoder.'''
+    model = load_model(bounded_loan_book, {'loans': [None]})
+
+    assert model.loans == [None]
+    assert model.model_dump()['loans'] == [None]
+    assert model.validate_model() == []
+
+
+def test_complex_fields_keep_subtypes_with_container_validation(bounded_loan_book):
+    '''Checking structure must not rebuild a subtype as its declared parent.'''
+    class DetailedCashFlow(CashFlow):
+        detail: str
+
+    loan = DetailedCashFlow(currency='EUR', amount=1, detail='subtype value')
+    model = bounded_loan_book(loan=loan, loans=[loan])
+
+    assert model.loan is loan
+    assert model.loans[0] is loan
+    assert model.loans[0].detail == 'subtype value'
+    assert model.validate_model() == []
+
+
+def test_complex_field_revalidation_enforces_cardinality(bounded_loan_book):
+    '''An invalid assignment must still fail explicit validation and serialization.'''
+    model = bounded_loan_book(loans=[CashFlow(currency='EUR', amount=1)])
+    model.loans = []
+
+    with pytest.raises(ValidationError):
+        model.validate_model()
+    with pytest.raises(ValidationError):
+        model.rune_serialize()
 
 
 def test_complex_type_preserves_subtype_identity():
