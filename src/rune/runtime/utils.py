@@ -4,7 +4,6 @@ from __future__ import annotations
 import datetime
 import inspect
 import keyword
-import logging
 from collections.abc import Callable, Iterable, MutableSequence
 from enum import Enum
 from typing import Any
@@ -30,6 +29,7 @@ __all__ = [
     'rune_flatten_list',
     'rune_get_only_element',
     'rune_join',
+    'rune_only_exists',
     'rune_resolve_attr',
     'rune_resolve_attr_values',
     'rune_resolve_deep_attr',
@@ -39,8 +39,6 @@ __all__ = [
     'rune_wrap_none',
     'rune_zoned_date_time'
 ]
-
-logger = logging.getLogger(__name__)
 
 
 def rune_unwrap_proxy(value: Any) -> Any:
@@ -153,12 +151,8 @@ def rune_check_one_of(obj, *attr_names, necessity=True) -> bool:
         vals = [getattr(obj, n, None) for n in attr_names]
     n_attr = sum(1 for v in vals if rune_attr_exists(v))
     if necessity and n_attr != 1:
-        logger.error('One and only one of %s should be set!', attr_names)
         return False
-    if not necessity and n_attr > 1:
-        logger.error('Only one of %s can be set!', attr_names)
-        return False
-    return True
+    return not (not necessity and n_attr > 1)
 
 
 def rune_count(obj: Any | None) -> int:
@@ -176,6 +170,55 @@ def rune_attr_exists(val: Any) -> bool:
     if val is None:
         return False
     return not (isinstance(val, MutableSequence) and len(val) == 0)
+
+
+def rune_only_exists(parent: Any | None, all_attrs: Iterable[str], required: Iterable[str]) -> bool:
+    """Check that exactly the required Rune attributes are set on the parent.
+
+    Use the declared type's attributes from `all_attrs`, with names resolved
+    as in `rune_resolve_attr`. Required names outside `all_attrs` always fail.
+    A missing parent or empty parent list fails. Every item of a non-empty
+    parent list must pass.
+
+    A list-valued field is set if it has a non-None item. A scalar Rune model
+    or draft is set if it contains a populated field. Other non-None scalars
+    are set even when falsey.
+    """
+    # Model and draft classes also import utilities from this module.
+    from rune.runtime.base_data_class import BaseDataClass
+    from rune.runtime.object_builder import ObjectBuilder
+
+    field_names = set(all_attrs)
+    required_names = set(required)
+
+    def is_set(value: Any, seen_models: set[int]) -> bool:
+        value = rune_unwrap_proxy(value)
+        if _is_rune_list_like(value):
+            return any(item is not None for item in value)
+        if not isinstance(value, (BaseDataClass, ObjectBuilder)):
+            return value is not None
+
+        if id(value) in seen_models:
+            return False
+        seen_models.add(id(value))
+        if isinstance(value, ObjectBuilder):
+            fields = value._data.values()
+        else:
+            fields = (getattr(value, name, None) for name in type(value).model_fields)
+        return any(is_set(field, seen_models) for field in fields)
+
+    def matches(obj: Any | None) -> bool:
+        if obj is None:
+            return False
+
+        populated = {
+            name for name in field_names
+            if is_set(rune_resolve_attr(obj, name), set())
+        }
+        return populated == required_names
+
+    parents = _to_list(parent)
+    return len(parents) > 0 and all(matches(item) for item in parents)
 
 
 def rune_str(x: Any) -> str:
