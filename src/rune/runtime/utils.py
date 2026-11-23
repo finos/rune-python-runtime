@@ -30,6 +30,7 @@ __all__ = [
     'rune_flatten_list',
     'rune_get_only_element',
     'rune_join',
+    'rune_only_exists',
     'rune_resolve_attr',
     'rune_resolve_attr_values',
     'rune_resolve_deep_attr',
@@ -176,6 +177,67 @@ def rune_attr_exists(val: Any) -> bool:
     if val is None:
         return False
     return not (isinstance(val, MutableSequence) and len(val) == 0)
+
+
+def rune_only_exists(parent: Any | None, all_attrs: Iterable[str], required: Iterable[str]) -> bool:
+    """Check that exactly the required Rune attributes are set on the parent.
+
+    Use the declared type's attributes from `all_attrs`, with names resolved
+    as in `rune_resolve_attr`. Required names outside `all_attrs` always fail.
+    A missing parent or empty parent list fails. Every item of a non-empty
+    parent list must pass.
+
+    A list-valued field is set if it has a non-None item. A scalar Rune model
+    or draft is set if it contains a populated field. Other non-None scalars
+    are set even when falsey. Log an error when the check fails.
+    """
+    # Model and draft classes also import utilities from this module.
+    from rune.runtime.base_data_class import BaseDataClass
+    from rune.runtime.object_builder import ObjectBuilder
+
+    field_names = dict.fromkeys(all_attrs)
+    required_names = dict.fromkeys(required)
+
+    def is_set(value: Any, seen_models: set[int]) -> bool:
+        value = rune_unwrap_proxy(value)
+        if _is_rune_list_like(value):
+            return any(item is not None for item in value)
+        if not isinstance(value, (BaseDataClass, ObjectBuilder)):
+            return value is not None
+
+        if id(value) in seen_models:
+            return False
+        seen_models.add(id(value))
+        if isinstance(value, ObjectBuilder):
+            fields = value._data.values()
+        else:
+            fields = (getattr(value, name, None) for name in type(value).model_fields)
+        return any(is_set(field, seen_models) for field in fields)
+
+    def matches(obj: Any | None) -> bool:
+        populated = [
+            name for name in field_names
+            if is_set(rune_resolve_attr(obj, name), set())
+        ] if obj is not None else []
+        if obj is not None and set(populated) == required_names.keys():
+            return True
+
+        expected = ('only ' + ', '.join(repr(name) for name in required_names)
+                    if required_names else 'no fields')
+        if obj is None:
+            reason = 'object was absent'
+        elif populated:
+            reason = 'set fields are: ' + ', '.join(repr(name) for name in populated)
+        else:
+            reason = 'no fields were set'
+        logger.error('Expected %s to be set, but %s.', expected, reason)
+        return False
+
+    if _is_rune_list_like(parent):
+        return all(matches(item)
+                   for item in parent) if len(parent) else matches(  # type: ignore
+                       None)
+    return matches(parent)
 
 
 def rune_str(x: Any) -> str:
