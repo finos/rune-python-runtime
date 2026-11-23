@@ -4,7 +4,6 @@ from __future__ import annotations
 import datetime
 import inspect
 import keyword
-import logging
 from collections.abc import Callable, Iterable, MutableSequence
 from enum import Enum
 from typing import Any
@@ -40,8 +39,6 @@ __all__ = [
     'rune_wrap_none',
     'rune_zoned_date_time'
 ]
-
-logger = logging.getLogger(__name__)
 
 
 def rune_unwrap_proxy(value: Any) -> Any:
@@ -154,12 +151,8 @@ def rune_check_one_of(obj, *attr_names, necessity=True) -> bool:
         vals = [getattr(obj, n, None) for n in attr_names]
     n_attr = sum(1 for v in vals if rune_attr_exists(v))
     if necessity and n_attr != 1:
-        logger.error('One and only one of %s should be set!', attr_names)
         return False
-    if not necessity and n_attr > 1:
-        logger.error('Only one of %s can be set!', attr_names)
-        return False
-    return True
+    return not (not necessity and n_attr > 1)
 
 
 def rune_count(obj: Any | None) -> int:
@@ -189,14 +182,14 @@ def rune_only_exists(parent: Any | None, all_attrs: Iterable[str], required: Ite
 
     A list-valued field is set if it has a non-None item. A scalar Rune model
     or draft is set if it contains a populated field. Other non-None scalars
-    are set even when falsey. Log an error when the check fails.
+    are set even when falsey.
     """
     # Model and draft classes also import utilities from this module.
     from rune.runtime.base_data_class import BaseDataClass
     from rune.runtime.object_builder import ObjectBuilder
 
-    field_names = dict.fromkeys(all_attrs)
-    required_names = dict.fromkeys(required)
+    field_names = set(all_attrs)
+    required_names = set(required)
 
     def is_set(value: Any, seen_models: set[int]) -> bool:
         value = rune_unwrap_proxy(value)
@@ -215,29 +208,17 @@ def rune_only_exists(parent: Any | None, all_attrs: Iterable[str], required: Ite
         return any(is_set(field, seen_models) for field in fields)
 
     def matches(obj: Any | None) -> bool:
-        populated = [
+        if obj is None:
+            return False
+
+        populated = {
             name for name in field_names
             if is_set(rune_resolve_attr(obj, name), set())
-        ] if obj is not None else []
-        if obj is not None and set(populated) == required_names.keys():
-            return True
+        }
+        return populated == required_names
 
-        expected = ('only ' + ', '.join(repr(name) for name in required_names)
-                    if required_names else 'no fields')
-        if obj is None:
-            reason = 'object was absent'
-        elif populated:
-            reason = 'set fields are: ' + ', '.join(repr(name) for name in populated)
-        else:
-            reason = 'no fields were set'
-        logger.error('Expected %s to be set, but %s.', expected, reason)
-        return False
-
-    if _is_rune_list_like(parent):
-        return all(matches(item)
-                   for item in parent) if len(parent) else matches(  # type: ignore
-                       None)
-    return matches(parent)
+    parents = _to_list(parent)
+    return len(parents) > 0 and all(matches(item) for item in parents)
 
 
 def rune_str(x: Any) -> str:

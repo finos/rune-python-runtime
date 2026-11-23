@@ -144,12 +144,9 @@ def test_only_exists_handles_cycles_when_checking_nested_models_for_data():
     assert rune_only_exists({'node': node}, ('node',), ('node',)) is True
 
 
-@pytest.mark.parametrize(('parent', 'message'), [
-    (None, "Expected only 'before' to be set, but object was absent."),
-    ([], "Expected only 'before' to be set, but object was absent."),
-    (_State(), "Expected only 'before' to be set, but no fields were set."),
-    (_State(before=1, other=2), "Expected only 'before' to be set, but set fields are: 'before', 'other'."),
-])
-def test_only_exists_logs_the_reason_for_failure(parent, message, caplog):
-    assert rune_only_exists(parent, _STATE_ATTRIBUTES, ('before',)) is False
-    assert caplog.record_tuples == [('rune.runtime.utils', logging.ERROR, message)]
+@pytest.mark.parametrize('parent', [None, [], _State(), _State(before=1, other=2)])
+def test_only_exists_returns_false_without_logging(parent, caplog):
+    with caplog.at_level(logging.DEBUG, logger=utils.__name__):
+        assert rune_only_exists(parent, _STATE_ATTRIBUTES, ('before',)) is False
+
+    assert not caplog.records
