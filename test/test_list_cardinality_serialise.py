@@ -11,7 +11,7 @@ from enum import Enum
 from typing import Annotated, ClassVar, Optional
 
 import pytest
-from pydantic import ConfigDict, Field, ValidationError
+from pydantic import ConfigDict, Field, TypeAdapter, ValidationError
 from pydantic_core import PydanticSerializationError
 
 from rune.runtime.base_data_class import BaseDataClass
@@ -212,6 +212,33 @@ def test_python_list_keeps_reference_and_inline_occurrences_distinct():
     assert json.loads(model.rune_serialize())['refs'] == [
         {'@ref:external': 'p1'}, {'@key:external': 'p1', 'name': 'A'},
     ]
+
+
+@pytest.mark.parametrize('wrapped', [False, True], ids=['list', 'cow_list'])
+def test_container_validation_preserves_reference_occurrences(wrapped):
+    '''A field adapter must retain occurrence metadata without model-level repair.'''
+    party = Party(name='A')
+    source = Holder(refs=[Reference(party, 'p1'), party])
+    values = rune_cow(source).refs if wrapped else source.refs
+    adapter = TypeAdapter(Annotated[
+        list[Party | None],
+        Party.serializer(),
+        Party.validator(('@key', '@key:external', '@key:scoped')),
+        Field(min_length=1, max_length=2),
+    ])
+
+    validated = adapter.validate_python(values, strict=True)
+
+    assert type(validated) is type(source.refs)
+    assert validated is not source.refs
+    assert validated[0] is validated[1] is party
+    assert validated.reference_at(0) == source.refs.reference_at(0)
+    assert validated.reference_at(1) is None
+    overfull = rune_cow(source.refs * 2) if wrapped else source.refs * 2
+    with pytest.raises(ValidationError):
+        adapter.validate_python(overfull, strict=True)
+    validated.pop()
+    assert len(source.refs) == 2
 
 
 @pytest.mark.parametrize('wrapped', [False, True], ids=['list', 'cow_list'])
